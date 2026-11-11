@@ -1,0 +1,31 @@
+[project]
+name = "ai-data-lab"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "dagster>=1.13.29",
+    "dbt-core>=1.12.6",
+    "dbt-duckdb>=1.11.1",
+    "duckdb>=2.0.0",
+    "polars>=2.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.7.0",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+    "sqlfluff>=4.5.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
