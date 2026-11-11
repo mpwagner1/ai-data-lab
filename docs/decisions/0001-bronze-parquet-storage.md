@@ -39,6 +39,16 @@ moves to cloud storage later without a rewrite.
   The run exits 1 if any file failed, so one bad file never hides the others and never passes
   silently. A missing landing folder exits 2 with an error. A folder with no CSVs logs a warning
   and exits 0.
+- Assumptions about the environment:
+  - **Single writer.** One ingest run per source at a time. Two concurrent non-force runs can both
+    pass the skip check and write the same file, so its rows would appear twice. Append-only still
+    holds (nothing is overwritten) and silver dedupes on `_file_hash`, but bronze does not
+    prevent it. Add locking if concurrent runs become possible.
+  - **Hard links.** The no-replace publish uses `os.link`, so the local filesystem must support
+    hard links, and there is no fallback. When bronze moves to Azure Blob Storage, `os.link` does not
+    exist there: use a conditional create-if-not-exists write instead (an upload with
+    `If-None-Match: *`, for example `overwrite=False` in the Azure SDK) and keep the same
+    never-replace rule.
 - Log values are JSON-quoted strings, so file names with spaces or newlines cannot break the
   `key=value` format.
 
