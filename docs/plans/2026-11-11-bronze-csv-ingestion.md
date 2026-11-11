@@ -1,7 +1,7 @@
 # Plan: Bronze ingestion for CSV files
 
 Date: 2026-11-11
-Status: In progress (task 1 merged in #11; task 2 in PR #14)
+Status: Done (PRs #11, #14, #17 and #20; ADR in #15)
 
 ## Goal
 
@@ -25,7 +25,7 @@ metadata columns (`_file_name`, `_ingested_at`, `_file_hash`, `_row_number`) add
   exits 1 at the end if any failed.
 - Column changes between files do not fail bronze (`union_by_name` at read time). Silver contracts
   handle them. A source column starting with `_` would collide with metadata, so it is rejected.
-- An empty file (no header) raises. A header-only file writes nothing and logs `rows_ingested=0`.
+- An empty file (no header) raises. A header-only file is written as a zero-row Parquet file (so it is skipped on later runs) and logs `rows_ingested=0`.
 - Out of scope: silver, gold, Dagster wiring, other file formats, cloud storage, compaction.
 - No existing helpers: `src/ingestion/` is an empty package.
 
@@ -50,7 +50,7 @@ task.
 - Two loads in the same second — the random suffix makes names unique, and the write still fails
   rather than overwrite; tested in task 2.
 - A crash mid-write — atomic temp-file write and no-replace publish; tested in task 2.
-- Header-only files are re-read on every run — harmless (nothing is written); deferred.
+- Header-only files would be re-read on every run — they are written as zero-row Parquet files so the skip check finds them (#19).
 - Schema drift between files produces nulls at read time — accepted by design; silver contracts
   must validate and quarantine.
 - Polars `scan_csv` quirks (quoting, BOM, encoding) altering raw values — tests in tasks 1 and 3;
@@ -64,5 +64,4 @@ task.
 
 ## Open questions
 
-- Should a header-only file be recorded so it is not re-read on every run? Currently it writes
-  nothing and returns `rows=0`.
+- None outstanding.
