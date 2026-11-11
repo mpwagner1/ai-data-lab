@@ -39,9 +39,11 @@ def test_path_and_name_follow_layout(tmp_path: Path) -> None:
         / "bronze"
         / "orders"
         / "ingest_date=2026-11-11"
-        / f"{hash_file(ORDERS)}20261111T163300Z.parquet"
+        / f"{hash_file(ORDERS)}20261111T163300Z_"
     )
-    assert _parquet_files(tmp_path) == [expected]
+    [actual] = _parquet_files(tmp_path)
+    assert actual.parent == expected.parent
+    assert re.fullmatch(re.escape(expected.name) + r"[0-9a-f]{8}\.parquet", actual.name)
 
 
 def test_rerun_skips_and_leaves_files_unchanged(tmp_path: Path) -> None:
@@ -70,7 +72,10 @@ def test_force_adds_new_file_and_keeps_old(tmp_path: Path) -> None:
     assert len({re.search(r"(\d{8}T\d{6}Z)", f.name).group(1) for f in files}) == 2
 
 
-def test_name_collision_fails_without_overwriting(tmp_path: Path) -> None:
+def test_name_collision_fails_without_overwriting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bronze.secrets, "token_hex", lambda n: "ab" * n)
     ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT)
     target = _parquet_files(tmp_path)[0]
     original = target.read_bytes()
@@ -155,3 +160,83 @@ def test_cli_ingests_landing_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert len(_parquet_files(tmp_path / "lake")) == 1
     assert main(["orders"]) == 0
     assert len(_parquet_files(tmp_path / "lake")) == 1
+
+
+def test_same_second_force_runs_both_succeed(tmp_path: Path) -> None:
+    ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT)
+    ingest_csv(ORDERS, "orders", tmp_path, force=True, run_at=RUN_AT)
+
+    assert len(_parquet_files(tmp_path)) == 2
+
+
+def test_leftover_temp_file_is_ignored_by_skip_check_and_reader(tmp_path: Path) -> None:
+    file_hash = hash_file(ORDERS)
+    partition = tmp_path / "bronze" / "orders" / "ingest_date=2026-11-11"
+    partition.mkdir(parents=True)
+    (partition / f"{file_hash}20261111T163300Z_deadbeef.parquet.tmp").write_bytes(b"PAR1 junk")
+
+    result = ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT)
+
+    assert not result.skipped
+    assert read_bronze("orders", tmp_path).count("*").fetchall() == [(3,)]
+
+
+def test_failed_write_removes_temp_and_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_write(self: pl.DataFrame, file: Path) -> None:
+        Path(file).write_bytes(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", fail_write)
+
+    with pytest.raises(OSError, match="disk full"):
+        ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT)
+
+    assert [p for p in tmp_path.rglob("*") if p.is_file()] == []
+
+
+def test_log_values_are_quoted(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO)
+    odd = tmp_path / "a b\nc.csv"
+    odd.write_bytes(ORDERS.read_bytes())
+
+    ingest_csv(odd, "orders", tmp_path / "lake", run_at=RUN_AT)
+
+    assert 'file_name="a b\\nc.csv"' in caplog.text
+    assert len(caplog.text.strip().splitlines()) == 1
+
+
+def test_cli_continues_after_a_failed_file_and_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    landing = tmp_path / "data" / "landing" / "orders"
+    landing.mkdir(parents=True)
+    (landing / "a_empty.csv").write_bytes(b"")
+    (landing / "b_ok.csv").write_bytes(ORDERS.read_bytes())
+    monkeypatch.chdir(tmp_path)
+    caplog.set_level(logging.INFO)
+
+    assert main(["orders"]) == 1
+
+    assert len(_parquet_files(tmp_path / "lake")) == 1
+    assert 'error="ValueError"' in caplog.text
+    assert "empty file" not in caplog.text
+
+
+def test_cli_missing_landing_folder_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["typo"]) == 2
+
+
+def test_cli_no_csvs_warns_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / "data" / "landing" / "orders").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["orders"]) == 0
+    assert "bronze_no_files" in caplog.text
