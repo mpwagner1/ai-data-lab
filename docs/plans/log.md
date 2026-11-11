@@ -14,3 +14,4 @@
 | 2026-11-11 | #16 | builder | Sonnet | PR #17 opened: CLI invalid-source exit 2, stale temp-file warning, numeric duration_s, three test gaps closed (pytest 51 passed). |
 | 2026-11-11 | #16 | code-reviewer | Sonnet | PR #17 reviewed: no blockers; 2 non-blocking notes (stale-temp warning cannot tell a dead run from a live writer, covered by the single-writer assumption; weak "Traceback" assertion). |
 | 2026-11-11 | #19 | builder | Sonnet | PR #20 opened: header-only CSVs are written as zero-row Parquet files so they are skipped on later runs (pytest 54 passed). Awaiting review. |
+| 2026-11-11 | #19 | code-reviewer | Sonnet | PR #20 reviewed: no blockers; 2 minor test gaps (differing-columns header-only read, metadata dtype assertions). |
