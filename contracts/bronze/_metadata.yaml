@@ -1,0 +1,15 @@
+# Metadata columns added to every bronze row (see docs/DATA_MODELING.md).
+# Source columns are not listed: bronze keeps them all as strings.
+columns:
+  - name: _file_name
+    type: string
+    description: Source file name (not full path)
+  - name: _ingested_at
+    type: timestamp_utc
+    description: When this load wrote the row; identical for every row in one load
+  - name: _file_hash
+    type: string
+    description: SHA-256 hex of the source file bytes
+  - name: _row_number
+    type: int
+    description: 1-based row position within the source file
