@@ -108,11 +108,63 @@ def test_empty_file_raises(tmp_path: Path) -> None:
     assert _parquet_files(tmp_path) == []
 
 
-def test_header_only_file_writes_nothing(tmp_path: Path) -> None:
-    result = ingest_csv(FIXTURES / "orders_header_only.csv", "orders", tmp_path, run_at=RUN_AT)
+HEADER_ONLY = FIXTURES / "orders_header_only.csv"
+
+
+def test_header_only_file_writes_zero_row_parquet(tmp_path: Path) -> None:
+    result = ingest_csv(HEADER_ONLY, "orders", tmp_path, run_at=RUN_AT)
 
     assert (result.rows, result.skipped) == (0, False)
-    assert _parquet_files(tmp_path) == []
+    [file] = _parquet_files(tmp_path)
+    assert file.name.startswith(result.file_hash)
+    frame = pl.read_parquet(file)
+    assert frame.height == 0
+    assert set(BRONZE_META_COLUMNS) <= set(frame.columns)
+    assert frame.schema["_file_hash"] == pl.String
+
+
+def test_header_only_rerun_is_skipped_without_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ingest_csv(HEADER_ONLY, "orders", tmp_path, run_at=RUN_AT)
+    before = _parquet_files(tmp_path)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("data was read on a skipped file")
+
+    monkeypatch.setattr(bronze, "_load_with_metadata", fail)
+    result = ingest_csv(HEADER_ONLY, "orders", tmp_path, run_at=RUN_AT + timedelta(seconds=5))
+
+    assert (result.rows, result.skipped) == (0, True)
+    assert _parquet_files(tmp_path) == before
+
+
+def test_header_only_force_adds_another_zero_row_file(tmp_path: Path) -> None:
+    ingest_csv(HEADER_ONLY, "orders", tmp_path, run_at=RUN_AT)
+    first = _parquet_files(tmp_path)
+    result = ingest_csv(
+        HEADER_ONLY, "orders", tmp_path, force=True, run_at=RUN_AT + timedelta(seconds=5)
+    )
+
+    assert (result.rows, result.skipped) == (0, False)
+    files = _parquet_files(tmp_path)
+    assert len(files) == 2
+    assert set(first) <= set(files)
+
+
+def test_read_bronze_mixes_header_only_and_data_files(tmp_path: Path) -> None:
+    header_columns = pl.read_csv(HEADER_ONLY, infer_schema=False).columns
+    ingest_csv(HEADER_ONLY, "orders", tmp_path, run_at=RUN_AT)
+    ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT)
+
+    relation = read_bronze("orders", tmp_path)
+    assert relation.count("*").fetchall() == [(3,)]
+    assert set(header_columns) <= set(relation.columns)
+    assert all(
+        str(t) == "VARCHAR"
+        for name, t in zip(relation.columns, relation.types, strict=True)
+        if name not in {"ingest_date", "_ingested_at", "_row_number"}
+    )
 
 
 def test_file_changing_during_read_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -290,7 +342,7 @@ def test_link_collision_removes_temp_file(tmp_path: Path, monkeypatch: pytest.Mo
     assert [p for p in tmp_path.rglob("*") if p.is_file()] == []
 
 
-def test_skip_and_empty_logs_have_numeric_duration(
+def test_write_and_skip_logs_have_numeric_duration(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO)
@@ -298,8 +350,9 @@ def test_skip_and_empty_logs_have_numeric_duration(
     ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT)
     ingest_csv(FIXTURES / "orders_header_only.csv", "orders", tmp_path, run_at=RUN_AT)
 
-    for event in ("bronze_write", "bronze_skip", "bronze_empty"):
-        [line] = [m for m in caplog.messages if f"event={event} " in m]
+    lines = [m for m in caplog.messages if m.startswith("event=bronze_")]
+    assert len(lines) == 3
+    for line in lines:
         assert re.search(r" duration_s=\d+(\.\d+)?$", line)
 
 
