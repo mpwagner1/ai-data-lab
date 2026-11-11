@@ -34,6 +34,7 @@
       "Bash(git push * -f)",
       "Bash(git push * --force-with-lease*)",
       "Bash(git push * main)",
+      "Bash(git push * main:*)",
       "Bash(git push * *:main)",
       "Bash(git push * *:refs/heads/main)",
       "Bash(gh pr merge *)",
