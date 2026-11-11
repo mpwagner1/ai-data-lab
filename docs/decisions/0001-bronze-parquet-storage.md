@@ -1,7 +1,7 @@
 # 0001: Bronze storage as partitioned Parquet, queried with DuckDB
 
 Date: 2026-11-11
-Status: Proposed (revised 2026-11-11: unique file names, atomic writes, batch behavior)
+Status: Proposed (revised 2026-11-11: unique file names, atomic writes, batch behavior, header-only files)
 
 ## Context
 
@@ -49,6 +49,11 @@ moves to cloud storage later without a rewrite.
     exist there: use a conditional create-if-not-exists write instead (an upload with
     `If-None-Match: *`, for example `overwrite=False` in the Azure SDK) and keep the same
     never-replace rule.
+- Header-only files (a header and zero data rows) are written as a zero-row Parquet file through
+  the same atomic write and naming. That records the load, so the hash-prefix skip check skips the
+  file on later runs and it is never re-read. `--force` writes another zero-row file. DuckDB reads
+  zero-row files together with data files (`union_by_name`), and their columns appear as nulls. A
+  file with no header (zero bytes or whitespace only) still raises.
 - Log values are JSON-quoted strings, so file names with spaces or newlines cannot break the
   `key=value` format.
 
@@ -73,5 +78,5 @@ moves to cloud storage later without a rewrite.
 - **`<file_hash>.parquet` only:** a forced same-day rerun would overwrite the file.
 - **`<file_hash><run_ts>.parquet` (no random suffix):** two forced loads of identical files in the
   same second collide, and one collision aborted the rest of a batch.
-- **Header-only files:** they write nothing and are re-read on every run. Recording them is left
-  as a later decision.
+- **Skipping header-only files by writing nothing:** a header-only CSV would leave no file for
+  the hash-prefix skip check to find, so it would be re-read on every run.
