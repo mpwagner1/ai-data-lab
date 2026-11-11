@@ -125,6 +125,8 @@ def ingest_csv(
 ) -> IngestResult:
     """Load one CSV into bronze; skip it if its hash was already loaded unless `force`.
 
+    A header-only file is written as a zero-row Parquet file so later runs skip it too.
+
     `run_at` (UTC) is injectable for tests; it defaults to now. Existing files are never
     overwritten: a name collision raises FileExistsError.
     """
@@ -143,16 +145,6 @@ def ingest_csv(
         )
         return IngestResult(path.name, file_hash, 0, skipped=True)
     frame = _load_with_metadata(path, file_hash, run_at)
-    if frame.height == 0:
-        _log(
-            "bronze_empty",
-            source=source,
-            file_name=path.name,
-            file_hash=file_hash,
-            rows_ingested=0,
-            duration_s=_elapsed(started),
-        )
-        return IngestResult(path.name, file_hash, 0, skipped=False)
     target = _target_path(source_dir, file_hash, run_at)
     _publish_new_file(frame, target)
     _log(
