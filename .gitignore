@@ -37,3 +37,6 @@ tmp*/
 # Local lake and landing data
 /lake/
 /data/
+
+# Local hook state
+.claude/.notify-state/
