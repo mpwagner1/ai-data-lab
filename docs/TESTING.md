@@ -3,8 +3,8 @@
 ## Run
 
 - All tests: `uv run pytest`
-- One file: `uv run pytest tests/test_<module>.py`
-- One test: `uv run pytest tests/test_<module>.py -k <name>`
+- One file: `uv run pytest tests/<package>/test_<module>.py`
+- One test: `uv run pytest tests/<package>/test_<module>.py -k <name>`
 - Config lives in `pyproject.toml` (`testpaths = ["tests"]`, `pythonpath = ["src"]`).
 
 ## Layout
