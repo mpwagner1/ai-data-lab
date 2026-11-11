@@ -240,3 +240,76 @@ def test_cli_no_csvs_warns_and_exits_zero(
 
     assert main(["orders"]) == 0
     assert "bronze_no_files" in caplog.text
+
+
+def test_cli_force_writes_new_file_and_keeps_old(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    landing = tmp_path / "data" / "landing" / "orders"
+    landing.mkdir(parents=True)
+    (landing / "orders.csv").write_bytes(ORDERS.read_bytes())
+    monkeypatch.chdir(tmp_path)
+    assert main(["orders"]) == 0
+    first = _parquet_files(tmp_path / "lake")
+
+    assert main(["orders", "--force"]) == 0
+
+    files = _parquet_files(tmp_path / "lake")
+    assert len(files) == 2
+    assert set(first) < set(files)
+    assert read_bronze("orders", tmp_path / "lake").count("*").fetchall() == [(6,)]
+
+
+def test_file_changing_before_read_fails_rehash_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "in.csv"
+    source.write_text("a\n1\n")
+    real_read = bronze.read_csv_as_strings
+
+    def modify_then_read(path: Path) -> pl.LazyFrame:
+        path.write_text("a\n2\n")  # changes after the first hash, before the load
+        return real_read(path)
+
+    monkeypatch.setattr(bronze, "read_csv_as_strings", modify_then_read)
+
+    with pytest.raises(RuntimeError, match="changed during ingestion"):
+        ingest_csv(source, "orders", tmp_path / "lake", run_at=RUN_AT)
+    assert _parquet_files(tmp_path / "lake") == []
+
+
+def _ingested(name: str, lake: Path) -> pl.DataFrame:
+    ingest_csv(FIXTURES / name, "orders", lake, run_at=RUN_AT)
+    return pl.read_parquet(_parquet_files(lake)[0])
+
+
+def test_bom_is_not_part_of_first_column_name(tmp_path: Path) -> None:
+    frame = _ingested("orders_bom.csv", tmp_path)
+
+    assert frame.columns[:2] == ["id", "name"]
+    assert frame["id"].to_list() == ["1", "2"]
+
+
+def test_quoted_fields_keep_embedded_newlines_commas_and_quotes(tmp_path: Path) -> None:
+    frame = _ingested("orders_quoted_newlines.csv", tmp_path)
+
+    assert frame.height == 2
+    assert frame["note"].to_list() == ["line one\nline two", 'has, comma and "quotes"']
+    assert frame["_row_number"].to_list() == [1, 2]
+
+
+def test_duplicate_rows_are_kept_as_is(tmp_path: Path) -> None:
+    frame = _ingested("orders_duplicate_rows.csv", tmp_path)
+
+    assert frame.select("id", "name").rows() == [("1", "alice"), ("1", "alice"), ("2", "bob")]
+    assert frame["_row_number"].to_list() == [1, 2, 3]
+
+
+def test_unquoted_empty_is_null_quoted_empty_is_empty_string_and_spaces_kept(
+    tmp_path: Path,
+) -> None:
+    frame = _ingested("orders_empty_values.csv", tmp_path)
+
+    assert frame["name"].to_list() == [None, "", " "]
+    assert frame["note"].to_list() == ["x", None, "z"]
+    assert frame.schema["name"] == pl.String
