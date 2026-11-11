@@ -79,8 +79,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/notify_slack.sh \"Alfred finished a task in ai-data-lab.\"",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/notify_slack.sh --stop \"Alfred finished a long task in ai-data-lab.\"",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/notify_slack.sh --mark-start >/dev/null 2>&1 || true",
+            "timeout": 2
           }
         ]
       }
