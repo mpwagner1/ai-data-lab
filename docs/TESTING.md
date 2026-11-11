@@ -10,8 +10,8 @@
 ## Layout
 
 - pytest only.
-- One test file per module: `src/ingestion/bronze.py` → `tests/test_bronze.py`.
-  Subpackages mirror the source tree.
+- One test file per module, mirroring the source tree:
+  `src/ingestion/bronze.py` → `tests/ingestion/test_bronze.py`.
 - Fixture files live in `tests/fixtures/`. Keep them small: a few rows, just enough to
   exercise the behavior. Name them for the case (`orders_with_bad_date.csv`).
 - Fixtures use synthetic data only. Never real PII or production extracts.

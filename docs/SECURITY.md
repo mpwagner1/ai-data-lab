@@ -19,8 +19,9 @@
 ## PII
 
 - Every column holding personal data is tagged in its contract
-  (`contracts/silver/<table>.yaml`), for example `pii: true` and a `pii_type`
-  such as `email` or `name`.
+  (`contracts/silver/<table>.yaml`) with `pii: true` and a `pii_type`.
+- Allowed `pii_type` values: `name`, `email`, `phone`, `address`, `dob`,
+  `government_id`, `financial`, `other`. Nothing else.
 - Untagged columns are assumed non-PII, so tag when in doubt.
 - Real PII never goes into tests or fixtures. Use synthetic values.
 - Gold models drop or mask PII columns unless a documented need exists.
