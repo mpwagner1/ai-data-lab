@@ -33,3 +33,7 @@ tmp*/
 .DS_Store
 .idea/
 .vscode/
+
+# Local lake and landing data
+lake/
+data/
