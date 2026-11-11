@@ -74,7 +74,9 @@ def _load_with_metadata(path: Path, file_hash: str, run_at: datetime) -> pl.Data
 
 
 def _quote(value: object) -> str:
-    return str(value) if isinstance(value, int) else json.dumps(str(value))
+    if isinstance(value, int | float):
+        return str(value)
+    return json.dumps(str(value))
 
 
 def _log(event: str, **fields: object) -> None:
@@ -83,8 +85,8 @@ def _log(event: str, **fields: object) -> None:
     logger.info("%s", " ".join([f"event={event}", *pairs]))
 
 
-def _elapsed(started: float) -> str:
-    return f"{time.monotonic() - started:.3f}"
+def _elapsed(started: float) -> float:
+    return round(time.monotonic() - started, 3)
 
 
 def _publish_new_file(frame: pl.DataFrame, target: Path) -> None:
@@ -99,6 +101,19 @@ def _publish_new_file(frame: pl.DataFrame, target: Path) -> None:
         os.link(temp, target)  # no-replace: raises FileExistsError
     finally:
         temp.unlink(missing_ok=True)
+
+
+def _warn_stale_temp_files(source: str, source_dir: Path) -> None:
+    """Report `.parquet.tmp` files left by a killed run. They are never deleted here."""
+    names = sorted(p.name for p in source_dir.glob("ingest_date=*/*.parquet.tmp"))
+    if not names:
+        return
+    logger.warning(
+        "event=bronze_stale_temp source=%s count=%d files=%s",
+        json.dumps(source),
+        len(names),
+        json.dumps(names),
+    )
 
 
 def ingest_csv(
@@ -172,6 +187,7 @@ def ingest_landing(source: str, landing_root: Path, lake_root: Path, force: bool
     folder = landing_root / source
     if not folder.is_dir():
         raise FileNotFoundError(f"landing folder not found: {folder}")
+    _warn_stale_temp_files(source, _source_dir(lake_root, source))
     files = sorted(folder.glob("*.csv"))
     if not files:
         logger.warning("event=bronze_no_files source=%s", json.dumps(source))
@@ -204,6 +220,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="reload files already ingested")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    try:
+        _validate_source(args.source)
+    except ValueError as error:
+        logger.error(
+            "event=bronze_error error=%s source=%s",
+            type(error).__name__,
+            json.dumps(args.source),
+        )
+        return 2
     try:
         failed = ingest_landing(args.source, LANDING_ROOT, LAKE_ROOT, force=args.force)
     except FileNotFoundError as error:

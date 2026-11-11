@@ -205,6 +205,8 @@ def test_log_values_are_quoted(tmp_path: Path, caplog: pytest.LogCaptureFixture)
 
     assert 'file_name="a b\\nc.csv"' in caplog.text
     assert len(caplog.text.strip().splitlines()) == 1
+    assert re.search(r"duration_s=\d+\.?\d*(\s|$)", caplog.text)
+    assert 'duration_s="' not in caplog.text
 
 
 def test_cli_continues_after_a_failed_file_and_exits_nonzero(
@@ -225,11 +227,80 @@ def test_cli_continues_after_a_failed_file_and_exits_nonzero(
 
 
 def test_cli_missing_landing_folder_exits_nonzero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
     assert main(["typo"]) == 2
+    assert "event=bronze_error" in caplog.text
+    assert "landing folder not found" in caplog.text
+
+
+def test_cli_invalid_source_logs_error_and_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["../x"]) == 2
+
+    assert 'event=bronze_error error=ValueError source="../x"' in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+def test_cli_warns_about_stale_temp_files_and_keeps_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    landing = tmp_path / "data" / "landing" / "orders"
+    landing.mkdir(parents=True)
+    (landing / "orders.csv").write_bytes(ORDERS.read_bytes())
+    partition = tmp_path / "lake" / "bronze" / "orders" / "ingest_date=2026-11-10"
+    partition.mkdir(parents=True)
+    stale = partition / "abc20261110T000000Z_deadbeef.parquet.tmp"
+    stale.write_bytes(b"junk")
+    monkeypatch.chdir(tmp_path)
+    caplog.set_level(logging.INFO)
+
+    assert main(["orders"]) == 0
+
+    assert "event=bronze_stale_temp" in caplog.text
+    assert "count=1" in caplog.text
+    assert stale.name in caplog.text
+    assert stale.exists()
+
+
+def test_no_stale_temp_warning_when_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / "data" / "landing" / "orders").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["orders"]) == 0
+    assert "bronze_stale_temp" not in caplog.text
+
+
+def test_link_collision_removes_temp_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_link(src: Path, dst: Path) -> None:
+        raise FileExistsError(dst)
+
+    monkeypatch.setattr(bronze.os, "link", fail_link)
+
+    with pytest.raises(FileExistsError):
+        ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT)
+
+    assert [p for p in tmp_path.rglob("*") if p.is_file()] == []
+
+
+def test_skip_and_empty_logs_have_numeric_duration(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT)
+    ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT)
+    ingest_csv(FIXTURES / "orders_header_only.csv", "orders", tmp_path, run_at=RUN_AT)
+
+    for event in ("bronze_write", "bronze_skip", "bronze_empty"):
+        [line] = [m for m in caplog.messages if f"event={event} " in m]
+        assert re.search(r" duration_s=\d+(\.\d+)?$", line)
 
 
 def test_cli_no_csvs_warns_and_exits_zero(
