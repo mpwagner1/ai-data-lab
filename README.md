@@ -41,3 +41,24 @@ uv run pytest
 
 - Work on a branch and open a PR; never push to `main`.
 - Never commit secrets (`.env` is git-ignored) or row-level data.
+
+## Bronze ingestion
+
+Put CSVs in `data/landing/<source>/`, then:
+
+```bash
+uv run python -m ingestion.bronze <source>           # skips files already loaded (by hash)
+uv run python -m ingestion.bronze <source> --force   # reload; adds a new file, keeps the old
+```
+
+Each load writes `lake/bronze/<source>/ingest_date=YYYY-MM-DD/<file_hash><run_ts>.parquet`.
+Read it back with DuckDB (missing columns come back null):
+
+```python
+from pathlib import Path
+from ingestion.bronze import read_bronze
+
+read_bronze("<source>", Path("lake")).show()
+```
+
+See `docs/decisions/0001-bronze-parquet-storage.md`.
