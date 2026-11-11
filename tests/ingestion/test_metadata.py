@@ -5,6 +5,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from ingestion import metadata
 from ingestion.csv_reader import read_csv_as_strings
 from ingestion.metadata import BRONZE_META_COLUMNS, add_bronze_metadata, hash_file
 
@@ -23,10 +24,17 @@ def test_hash_matches_hashlib() -> None:
     assert hash_file(source) == hashlib.sha256(source.read_bytes()).hexdigest()
 
 
-def test_hash_streams_files_larger_than_one_chunk(tmp_path: Path) -> None:
-    big = tmp_path / "big.csv"
-    big.write_bytes(b"a\n" + b"x\n" * (1024 * 1024 + 5))
-    assert hash_file(big) == hashlib.sha256(big.read_bytes()).hexdigest()
+def test_hash_reads_in_multiple_chunks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(metadata, "_HASH_CHUNK_BYTES", 4)
+    source = tmp_path / "multi.csv"
+    source.write_bytes(b"a\n" + b"xyz\n" * 10)
+    assert hash_file(source) == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def test_hash_of_empty_file_is_sha256_of_empty_bytes(tmp_path: Path) -> None:
+    source = tmp_path / "empty.csv"
+    source.write_bytes(b"")
+    assert hash_file(source) == hashlib.sha256(b"").hexdigest()
 
 
 def test_adds_four_metadata_columns_after_source_columns() -> None:

@@ -35,5 +35,5 @@ tmp*/
 .vscode/
 
 # Local lake and landing data
-lake/
-data/
+/lake/
+/data/

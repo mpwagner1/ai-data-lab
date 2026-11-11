@@ -29,6 +29,11 @@ def test_empty_file_raises() -> None:
         read_csv_as_strings(FIXTURES / "empty.csv")
 
 
+def test_whitespace_only_file_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="empty file"):
+        read_csv_as_strings(FIXTURES / "blank_lines_only.csv")
+
+
 def test_header_only_file_gives_zero_rows() -> None:
     frame = read_csv_as_strings(FIXTURES / "orders_header_only.csv").collect()
     assert frame.height == 0
