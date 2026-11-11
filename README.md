@@ -51,7 +51,7 @@ uv run python -m ingestion.bronze <source>           # skips files already loade
 uv run python -m ingestion.bronze <source> --force   # reload; adds a new file, keeps the old
 ```
 
-Each load writes `lake/bronze/<source>/ingest_date=YYYY-MM-DD/<file_hash><run_ts>.parquet`.
+Each load writes `lake/bronze/<source>/ingest_date=YYYY-MM-DD/<file_hash><run_ts>_<8 hex>.parquet`.
 Read it back with DuckDB (missing columns come back null):
 
 ```python
@@ -61,4 +61,5 @@ from ingestion.bronze import read_bronze
 read_bronze("<source>", Path("lake")).show()
 ```
 
-See `docs/decisions/0001-bronze-parquet-storage.md`.
+How it works, the log events and exit codes: [docs/BRONZE.md](docs/BRONZE.md).
+Decision record: `docs/decisions/0001-bronze-parquet-storage.md`.
