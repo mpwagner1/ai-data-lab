@@ -31,3 +31,5 @@
 | 2026-11-12 | #44 | builder | Sonnet | PR #46 opened: wrong config encoding holds as `encoding` (BOM rule, decoded-header check), narrowed NUL rule, symlink test gaps (pytest 156 passed). |
 | 2026-11-12 | #44 | code-reviewer | Sonnet | PR #46 reviewed: fix first. UTF-8 data with an explicit-endian config (utf-16-be/le) still loads a garbage zero-row file marked ingested; header-only wrong-endian without newline loads; low items (UTF-8 BOM with latin-1 config, Unicode 15 limit, test strength). |
 | 2026-11-12 | #44 | builder (resumed) | Sonnet | Dispatched on PR #46 for review findings 1, 2, 3, 4, 5. Result pending. |
+| 2026-11-12 | #44 | builder (resumed) | Sonnet | PR #46 fixes: no-NUL rule and low-order-byte wrong-endian check for UTF-16/32 configs, UTF-8 BOM held with non-utf-8-sig codecs, docstring and test fixes (pytest 226 passed). |
+| 2026-11-12 | #44 | code-reviewer | Sonnet | PR #46 third review: merge. ~200 cases executed, no wrong-encoding file loads silently. One medium: `_wrong_byte_order` falsely holds some correct UTF-16 CJK files whose characters have a zero low byte (visible exit 3, not silent). |
