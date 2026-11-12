@@ -355,3 +355,101 @@ def test_bad_config_format_exits_2_and_copies_nothing(
     assert not (project / "lake" / "raw").exists()
     assert "SECRETFORMAT" not in caplog.text
     assert "ValueError" in caplog.text
+
+
+def _assert_held_as_encoding(project: Path, caplog: pytest.LogCaptureFixture) -> None:
+    assert main(["demo"]) == 3
+    assert 'reason="encoding"' in caplog.text
+    assert not (project / "lake" / "bronze").exists()
+    assert len(_raw_files(project)) == 1
+    assert SECRET not in caplog.text
+    assert "utf-16" not in caplog.text
+    caplog.clear()
+    assert main(["demo", "--pending"]) == 3  # nothing was marked ingested
+    assert "event=bronze_pending " in caplog.text
+    assert not (project / "lake" / "bronze").exists()
+
+
+@pytest.mark.parametrize(
+    ("written", "configured"),
+    [
+        ("utf-16-le", "utf-16-be"),
+        ("utf-16-be", "utf-16-le"),
+        ("utf-32-le", "utf-32-be"),
+        ("utf-32-be", "utf-32-le"),
+        ("utf-8", "utf-16"),
+        ("utf-16-le", "utf-16"),  # plain utf-16 needs a BOM
+        ("utf-16-be", "utf-16"),
+        ("utf-16", "latin-1"),
+    ],
+)
+def test_wrong_config_encoding_is_held_and_writes_nothing(
+    project: Path, caplog: pytest.LogCaptureFixture, written: str, configured: str
+) -> None:
+    (_landing(project) / "a.csv").write_bytes(f"id,code\n1,{SECRET}\n".encode(written))
+    _config(project, f"encoding: {configured}\n")
+    caplog.set_level(logging.INFO)
+    _assert_held_as_encoding(project, caplog)
+
+
+def test_correct_config_still_loads_values_unchanged(project: Path) -> None:
+    (_landing(project) / "a.csv").write_bytes(f"id,code\n001,{SECRET}\n".encode("utf-16-be"))
+    _config(project, "encoding: utf-16-be\n")
+    assert main(["demo"]) == 0
+    frame = pl.read_parquet(_bronze_files(project)[0])
+    assert frame["id"].to_list() == ["001"]
+    assert frame["code"].to_list() == [SECRET]
+
+
+@pytest.mark.parametrize("padding", [0, 2_000_000])
+def test_stray_nul_in_valid_utf8_loads_unchanged(project: Path, padding: int) -> None:
+    rows = "".join(f"{n},filler\n" for n in range(padding // 10))
+    stray = f"id,code\n1,AB\x00{SECRET}\n{rows}"
+    if padding:
+        stray += f"2,{SECRET}\x00\n"
+    (_landing(project) / "a.csv").write_bytes(stray.encode())
+    assert main(["demo"]) == 0
+    frame = pl.read_parquet(_bronze_files(project)[0])
+    assert frame["code"][0] == f"AB\x00{SECRET}"
+    assert frame["code"][-1] == (f"{SECRET}\x00" if padding else f"AB\x00{SECRET}")
+
+
+def test_stray_nul_with_invalid_utf8_is_held_as_encoding(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rows = "".join(f"{n},filler\n" for n in range(200_000))
+    data = f"id,code\n{rows}".encode() + b"9,\xff\x00\n"
+    (_landing(project) / "a.csv").write_bytes(data)
+    caplog.set_level(logging.INFO)
+    assert main(["demo"]) == 3
+    assert 'reason="encoding"' in caplog.text
+    assert not (project / "lake" / "bronze").exists()
+
+
+def test_symlinked_directory_is_skipped_and_counted(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    landing = _landing(project)
+    elsewhere = project / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "x.csv").write_text(f"id,v\n9,{SECRET}\n")
+    (landing / "linked_dir").symlink_to(elsewhere, target_is_directory=True)
+    (landing / "real.csv").write_text("id\n1\n")
+    caplog.set_level(logging.INFO)
+    assert main(["demo"]) == 0
+    assert len(_raw_files(project)) == 1
+    assert "symlinks=1" in caplog.text
+    assert SECRET not in caplog.text
+
+
+def test_symlink_to_target_inside_landing_is_skipped_and_counted(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    landing = _landing(project)
+    (landing / "real.csv").write_text("id\n1\n")
+    (landing / "alias.csv").symlink_to(landing / "real.csv")
+    caplog.set_level(logging.INFO)
+    assert main(["demo"]) == 0
+    assert len(_raw_files(project)) == 1
+    assert len(_bronze_files(project)) == 1
+    assert "symlinks=1" in caplog.text
