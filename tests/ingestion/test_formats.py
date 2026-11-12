@@ -155,9 +155,22 @@ def test_bad_delimiters_rejected(delimiter: str) -> None:
         parse_source_config({"delimiter": delimiter})
 
 
-def test_non_text_encoding_rejected() -> None:
-    with pytest.raises(ValueError):
-        parse_source_config({"encoding": "hex"})
+@pytest.mark.parametrize("encoding", ["hex", "base64", "zlib", "rot13", "undefined", "nope"])
+def test_non_text_or_unknown_encoding_rejected(encoding: str) -> None:
+    with pytest.raises(ValueError) as error:
+        parse_source_config({"encoding": encoding})
+    assert encoding not in str(error.value)
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16", "cp1252", "latin-1"])
+def test_text_encodings_accepted(encoding: str) -> None:
+    assert parse_source_config({"encoding": encoding}).encoding == encoding
+
+
+def test_unknown_key_error_does_not_echo_key_names() -> None:
+    with pytest.raises(ValueError, match="unknown source config keys") as error:
+        parse_source_config({"SECRETKEY": 1})
+    assert "SECRETKEY" not in str(error.value)
 
 
 def _landing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
