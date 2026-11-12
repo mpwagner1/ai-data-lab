@@ -455,3 +455,56 @@ def test_parquet_array_of_structs_with_non_finite_floats_kept(tmp_path: Path) ->
     )
     out = _frame(read_parquet_as_strings(_parquet(tmp_path / "d.parquet", frame), CONFIG, None))
     assert out["a"].to_list() == ['[{"k":"x","v":NaN},{"k":"y","v":2.0}]']
+
+
+def _duck_parquet(path: Path, select: str) -> Path:
+    import duckdb
+
+    duckdb.sql(f"COPY (SELECT {select}) TO '{path}' (FORMAT parquet)")
+    return path
+
+
+def _read_map(tmp_path: Path, select: str) -> tuple[str | None, ...]:
+    path = _duck_parquet(tmp_path / "m.parquet", select)
+    frame = _frame(read_parquet_as_strings(path, CONFIG, None))
+    assert set(frame.schema.values()) == {pl.String}
+    return frame.row(0)
+
+
+def test_parquet_string_map_is_list_of_pairs_in_order(tmp_path: Path) -> None:
+    row = _read_map(tmp_path, "MAP {'b': 'x', 'a': 'y'} AS m")
+    assert row == ('[{"key":"b","value":"x"},{"key":"a","value":"y"}]',)
+
+
+def test_parquet_map_floats_nan_inf(tmp_path: Path) -> None:
+    select = "MAP {'a': 1.5, 'b': 'nan'::DOUBLE, 'c': 'inf'::DOUBLE, 'd': '-inf'::DOUBLE} AS m"
+    [text] = _read_map(tmp_path, select)
+    assert text == (
+        '[{"key":"a","value":1.5},{"key":"b","value":NaN},'
+        '{"key":"c","value":inf},{"key":"d","value":-inf}]'
+    )
+
+
+def test_parquet_map_inside_struct(tmp_path: Path) -> None:
+    [text] = _read_map(tmp_path, "{'id': 1, 'm': MAP {'a': 'x'}} AS s")
+    assert text == '{"id":1,"m":[{"key":"a","value":"x"}]}'
+
+
+def test_parquet_map_inside_list(tmp_path: Path) -> None:
+    [text] = _read_map(tmp_path, "[MAP {'a': 1.5}, MAP {'b': 'nan'::DOUBLE}] AS l")
+    assert text == '[[{"key":"a","value":1.5}],[{"key":"b","value":NaN}]]'
+
+
+def test_parquet_null_and_empty_map(tmp_path: Path) -> None:
+    row = _read_map(tmp_path, "NULL::MAP(VARCHAR, INT) AS n, MAP {}::MAP(VARCHAR, VARCHAR) AS e")
+    assert row == (None, "[]")
+
+
+def test_parquet_map_with_null_values(tmp_path: Path) -> None:
+    [text] = _read_map(tmp_path, "MAP {'a': NULL, 'b': 'x'} AS m")
+    assert text == '[{"key":"a","value":null},{"key":"b","value":"x"}]'
+
+
+def test_parquet_map_with_int_keys_and_date_values(tmp_path: Path) -> None:
+    [text] = _read_map(tmp_path, "MAP {1: DATE '2020-01-02', 2: NULL} AS m")
+    assert text == '[{"key":1,"value":"2020-01-02"},{"key":2,"value":null}]'

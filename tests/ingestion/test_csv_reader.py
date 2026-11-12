@@ -46,13 +46,7 @@ def test_underscore_prefixed_column_is_rejected_by_name() -> None:
         read_csv_as_strings(FIXTURES / "orders_underscore_column.csv")
 
 
-# Item 1 of issue #33: correct UTF-16 text whose characters have a zero low byte (U+4E00, U+AC00)
-# is held as "byte order" by `_wrong_byte_order` when those characters outnumber the newlines.
-_FALSE_HOLD = pytest.mark.xfail(
-    strict=True,
-    reason="_wrong_byte_order holds correct UTF-16 CJK/Hangul text (zero low byte outnumbers "
-    "newlines); builder fix pending, remove this marker with the fix",
-)
+# Correct UTF-16 text whose characters have a zero low byte (U+4E00, U+AC00) must load.
 _CJK_ROWS = {"cjk": ("名,都", "一", "一一一一"), "hangul": ("이름,도시", "가", "가가가가")}
 
 
@@ -71,8 +65,8 @@ def _read_rows(path: Path, encoding: str) -> list[tuple[str, ...]]:
 @pytest.mark.parametrize(
     "encoding",
     [
-        pytest.param("utf-16-le", marks=_FALSE_HOLD),
-        pytest.param("utf-16-be", marks=_FALSE_HOLD),
+        "utf-16-le",
+        "utf-16-be",
         "utf-32-le",
         "utf-32-be",
     ],
@@ -102,3 +96,77 @@ def test_cjk_file_with_bom_loads_unchanged_with_plain_codec(
     path.write_bytes((bom if big_endian else le_bom) + text.encode(encoding + order))
 
     assert _read_rows(path, encoding) == rows
+
+
+_SCRIPTS = {
+    "latin": ("nom,ville", "José,Zürich"),
+    "cyrillic": ("имя,город", "Анна,Москва"),
+    "greek": ("όνομα,πόλη", "Ελένη,Αθήνα"),
+    "arabic": ("الاسم,المدينة", "علي,القاهرة"),
+    "hebrew": ("שם,עיר", "דנה,חיפה"),
+    "hangul": ("이름,도시", "가나,다라"),
+    "cjk": ("名,都", "一一,三〇〇〇"),
+    "cjk_ascii": ("name,名", "A1,一二"),
+    "emoji": ("a,b", "😀,🎉"),
+}
+_ORDERS = [("utf-16-le", "utf-16-be"), ("utf-16-be", "utf-16-le")]
+_ORDERS += [("utf-32-le", "utf-32-be"), ("utf-32-be", "utf-32-le")]
+
+
+@pytest.mark.parametrize("script", sorted(_SCRIPTS))
+@pytest.mark.parametrize(("written", "read_as"), _ORDERS)
+def test_scripts_correct_order_loads_and_wrong_order_is_held(
+    tmp_path: Path, script: str, written: str, read_as: str
+) -> None:
+    header, row = _SCRIPTS[script]
+    path = tmp_path / "a.csv"
+    path.write_bytes(f"{header}\n{row}\n".encode(written))
+
+    assert _read_rows(path, written) == [tuple(row.split(","))]
+    with pytest.raises(UnicodeError):
+        read_csv_as_strings(path, encoding=read_as)
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("char", ["一", "　"])
+def test_many_zero_low_byte_chars_with_one_newline_load(
+    tmp_path: Path, encoding: str, char: str
+) -> None:
+    path = tmp_path / "a.csv"
+    path.write_bytes(f"h\n{char * 5000}\n".encode(encoding))
+
+    assert _read_rows(path, encoding) == [(char * 5000,)]
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+def test_file_with_only_a_newline_as_ascii_is_decided(tmp_path: Path, encoding: str) -> None:
+    other = "utf-16-be" if encoding == "utf-16-le" else "utf-16-le"
+    path = tmp_path / "a.csv"
+    path.write_bytes("名前\n一二\n".replace(",", "").encode(encoding))
+
+    assert _read_rows(path, encoding) == [("一二",)]
+    with pytest.raises(UnicodeError):
+        read_csv_as_strings(path, encoding=other)
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("text", ["名前", "一一一", "이름", "😀"])
+def test_single_line_without_ascii_is_undecidable_and_held(
+    tmp_path: Path, encoding: str, text: str
+) -> None:
+    path = tmp_path / "a.csv"
+    path.write_bytes(text.encode(encoding))
+
+    with pytest.raises(UnicodeError):
+        read_csv_as_strings(path, encoding=encoding)
+
+
+@pytest.mark.parametrize(
+    ("written", "bom"), [("utf-16-le", codecs.BOM_UTF16_BE), ("utf-16-be", codecs.BOM_UTF16_LE)]
+)
+def test_bom_contradicting_the_codec_is_held(tmp_path: Path, written: str, bom: bytes) -> None:
+    path = tmp_path / "a.csv"
+    path.write_bytes(bom + "id,name\n1,x\n".encode(written))
+
+    with pytest.raises(UnicodeError):
+        read_csv_as_strings(path, encoding=written)

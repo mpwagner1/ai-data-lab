@@ -10,13 +10,18 @@ Polars (2.1) gives; the original file stays in the raw zone. Observed forms:
 - dates: `YYYY-MM-DD`. Times: `HH:MM:SS`.
 - timestamps: `YYYY-MM-DD HH:MM:SS.<fraction>`, where the fraction follows the column's time unit
   (ms gives 3 digits, us 6, ns 9). A time-zone-aware column adds the offset (`+00:00`, `-05:00`).
-- durations: ISO-8601 text as Polars writes it (`PT1M30.000005S`, `-P1D`; `PT90S` for 90 s).
+- durations: ISO-8601 text as Polars writes it (`PT1M30.000005S`, `-P1D`; `PT1M30S` for 90 s).
 - strings and categoricals: unchanged.
 - binary: lowercase hex (`00ab`). Raw bytes may not be valid text, so hex is the safe form.
-- struct, list, array and map (a list of key/value structs): compact JSON text
-  (`{"a":1,"b":"x"}`, `[1,2]`). Inside that JSON, numbers and booleans are JSON values; dates,
-  times, timestamps, decimals and durations are JSON strings (`"2020-01-02"`, `"1.50"`).
-  Binary inside a nested value is not supported by Polars and fails the file.
+- struct, list and array: compact JSON text (`{"a":1,"b":"x"}`, `[1,2]`).
+- map: a JSON list of key/value pairs in file order, for every key type
+  (`[{"key":"a","value":"x"},{"key":"b","value":null}]`; empty map `[]`; null map is null).
+  A list of pairs, not an object, because keys need not be strings and the form stays the same
+  for all of them. A map inside a struct, list or array becomes the same list of pairs.
+- inside nested JSON, numbers and booleans are JSON values; dates, times, timestamps,
+  decimals and durations are JSON strings (`"2020-01-02"`, `"1.50"`).
+  Nested floats NaN, inf and -inf are written as bare tokens (`NaN`, `inf`), which strict JSON
+  parsers reject. Binary inside a nested value is not supported by Polars and fails the file.
 - null stays null, in nested values too.
 
 All columns are collected in full, so memory is unbounded for large files (caps come with
@@ -36,7 +41,7 @@ import polars as pl
 from ingestion.parsed import ParsedPart
 from ingestion.source_config import SourceConfig
 
-_NESTED = (pl.Struct, pl.List, pl.Array)
+_NESTED = (pl.Struct, pl.List, pl.Array, pl.Map)
 _WRAP = "bronze_wrap"
 _WRAP_PREFIX = len(f'{{"{_WRAP}":')
 
@@ -47,6 +52,20 @@ class ParquetReadError(ValueError):
 
 def _fail(path: Path, problem: str) -> ParquetReadError:
     return ParquetReadError(f"cannot read Parquet {path.name}: {problem}")
+
+
+def _without_maps(dtype: pl.DataType) -> pl.DataType:
+    """The same dtype with every Map replaced by a list of {key, value} structs."""
+    if isinstance(dtype, pl.Map):
+        pair = pl.Struct({"key": _without_maps(dtype.key), "value": _without_maps(dtype.value)})
+        return pl.List(pair)
+    if isinstance(dtype, pl.Struct):
+        return pl.Struct({f.name: _without_maps(f.dtype) for f in dtype.fields})
+    if isinstance(dtype, pl.List):
+        return pl.List(_without_maps(dtype.inner))
+    if isinstance(dtype, pl.Array):
+        return pl.Array(_without_maps(dtype.inner), dtype.shape)
+    return dtype
 
 
 def _contains_binary(dtype: pl.DataType) -> bool:
@@ -108,6 +127,7 @@ def _nested_to_json(series: pl.Series) -> pl.Series:
 
 def _as_string(series: pl.Series) -> pl.Series:
     if isinstance(series.dtype, _NESTED):
+        series = series.cast(_without_maps(series.dtype))
         if _contains_binary(series.dtype):
             raise ValueError("binary inside a nested value")
         return _nested_to_json(series).alias(series.name)

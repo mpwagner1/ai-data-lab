@@ -3,6 +3,7 @@
 import codecs
 import io
 import unicodedata
+from collections import Counter
 from pathlib import Path
 
 import polars as pl
@@ -60,21 +61,56 @@ def _is_garbage_char(char: str) -> bool:
     return char == "\ufffd" or unicodedata.category(char) in {"Cc", "Cn", "Co", "Cs"}
 
 
-def _wrong_byte_order(sample: bytes, codec: str) -> bool:
-    """True if an explicit-endian UTF-16/32 sample has its NUL bytes where the low byte should be.
+_STRUCTURAL = frozenset(b'\t\n\r,;|"')
 
-    ASCII-range text has NUL in the high-order bytes of each code unit. If the NULs sit in the
-    low-order byte instead, the bytes were written in the opposite order.
+
+def _ascii_votes(sample: bytes, size: int, big: bool) -> tuple[int, int, int, int]:
+    """Count code units that read as ASCII in the declared order and in the opposite order.
+
+    Returns (right structural, wrong structural, right any, wrong any). "Structural" is tab,
+    newline, CR, comma, semicolon, pipe and quote. A unit is ASCII when its value is 1..127.
+    """
+    right_order, wrong_order = ("big", "little") if big else ("little", "big")
+    counts = Counter(sample[i : i + size] for i in range(0, len(sample), size))
+    votes = [0, 0, 0, 0]
+    for unit, number in counts.items():
+        for offset, order in ((0, right_order), (1, wrong_order)):
+            value = int.from_bytes(unit, order)
+            if not 0 < value < 0x80:
+                continue
+            votes[2 + offset] += number
+            if value in _STRUCTURAL:
+                votes[offset] += number
+    return votes[0], votes[1], votes[2], votes[3]
+
+
+def _wrong_byte_order(sample: bytes, codec: str) -> bool:
+    """True if an explicit-endian UTF-16/32 sample looks written in the opposite byte order.
+
+    Only ASCII code units decide: an ASCII character has exactly one non-zero byte, and which
+    byte it is tells the order. Other characters are ignored, because a correct file can hold
+    characters that look swapped (U+4E00 and U+3000 read in the other order are the ASCII
+    letter `N` and `0`). Structural ASCII (newline, comma, quote, ...) votes first, since text
+    does not contain those by accident; only a sample with none falls back to all ASCII units
+    (letters, digits, space). Held (True) when the opposite order has more votes, and also
+    when the sample has no ASCII code unit at all (undecidable).
+
+    Undecidable wrong-endian cases, all held and never loaded: a sample with no ASCII code
+    unit, such as a one-line file of only CJK, Hangul or emoji; a one-line file made only of
+    characters that look like ASCII when swapped (U+4E00 only). A wrong-endian file whose
+    structural ASCII is outweighed by characters like U+0A00 or U+2C00 cannot be told apart
+    from correct text and loads (a visibly garbled header is still held by the header check).
     """
     size = 2 if codec.startswith("utf-16") else 4
     sample = sample[: len(sample) - len(sample) % size]
     if not sample:
         return False
-    low_at = size - 1 if codec.endswith("-be") else 0
-    units = len(sample) // size
-    low_nuls = sample[low_at::size].count(0)
-    high_nuls = sample.count(0) - low_nuls
-    return low_nuls / units > high_nuls / (units * (size - 1))
+    right_s, wrong_s, right_any, wrong_any = _ascii_votes(sample, size, codec.endswith("-be"))
+    if right_s + wrong_s:
+        return wrong_s > right_s
+    if right_any + wrong_any == 0:
+        return True
+    return wrong_any > right_any
 
 
 def _check_decoded(raw: bytes, text: str, encoding: str) -> None:
@@ -85,8 +121,9 @@ def _check_decoded(raw: bytes, text: str, encoding: str) -> None:
     - UTF-16/32 (plain or explicit-endian): real text of any realistic file has NUL bytes
       (a newline code unit contains one), so bytes with no NUL are UTF-8 or other single-byte
       text read with the wrong codec. Plain `utf-16`/`utf-32` must also start with a BOM.
-    - Explicit-endian UTF-16/32: NUL bytes must sit in the high-order byte (wrong byte order
-      is held, including a header-only file with no newline).
+    - Explicit-endian UTF-16/32: ASCII code units must have their zero bytes in the high-order
+      position (wrong byte order is held, including a header-only file with no newline; see
+      `_wrong_byte_order` for the undecidable cases, which are held).
     - A UTF-8 BOM read with any codec other than `utf-8-sig` is held (it would otherwise leak
       into the first column name).
     - The first line must have no replacement, control, unassigned or private-use characters.
