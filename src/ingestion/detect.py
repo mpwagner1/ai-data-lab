@@ -42,12 +42,21 @@ def validate_format(name: str) -> FileFormat:
         raise ValueError("unknown `format` in source config") from None
 
 
+_BROKEN_ZIP_BY_EXTENSION = {
+    ".xlsx": FileFormat.XLSX,
+    ".xlsm": FileFormat.XLSX,
+    ".ods": FileFormat.ODS,
+}
+
+
 def _zip_container(path: Path) -> FileFormat:
     try:
         with zipfile.ZipFile(path) as archive:
             names = set(archive.namelist())
     except zipfile.BadZipFile:
-        return FileFormat.ZIP
+        # A truncated or corrupt workbook is still a workbook: its reader fails it loudly
+        # instead of it waiting as an archive.
+        return _BROKEN_ZIP_BY_EXTENSION.get(path.suffix.lower(), FileFormat.ZIP)
     if "xl/workbook.xml" in names:
         return FileFormat.XLSX
     if "content.xml" in names and "mimetype" in names:

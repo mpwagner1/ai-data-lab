@@ -37,8 +37,8 @@ def test_hash_of_empty_file_is_sha256_of_empty_bytes(tmp_path: Path) -> None:
     assert hash_file(source) == hashlib.sha256(b"").hexdigest()
 
 
-def test_adds_four_metadata_columns_after_source_columns() -> None:
-    assert tuple(_load().columns[-4:]) == BRONZE_META_COLUMNS
+def test_adds_five_metadata_columns_after_source_columns() -> None:
+    assert tuple(_load().columns[-5:]) == BRONZE_META_COLUMNS
 
 
 def test_row_number_is_one_based_and_contiguous() -> None:
@@ -62,7 +62,7 @@ def test_header_only_file_has_zero_rows_with_metadata_columns() -> None:
     frame = add_bronze_metadata(read_csv_as_strings(source), source.name, "h", INGESTED_AT)
     result = frame.collect()
     assert result.height == 0
-    assert tuple(result.columns[-4:]) == BRONZE_META_COLUMNS
+    assert tuple(result.columns[-5:]) == BRONZE_META_COLUMNS
 
 
 @pytest.mark.parametrize(

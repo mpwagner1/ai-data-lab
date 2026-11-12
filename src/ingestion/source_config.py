@@ -12,19 +12,26 @@ from ingestion.csv_reader import DEFAULT_ENCODING
 
 CONFIG_ROOT = Path("config/sources")
 _FORBIDDEN_DELIMITERS = frozenset({'"', "\n", "\r"})
-_KNOWN_KEYS = frozenset({"delimiter", "encoding", "format", "sheets"})
+_KNOWN_KEYS = frozenset({"delimiter", "encoding", "format", "sheets", "header_row"})
 
 
 @dataclass(frozen=True)
 class SourceConfig:
-    """Settings for one source. `format` and `sheets` are stored now and used by later readers."""
+    """Settings for one source.
+
+    `sheets` limits which workbook sheets are read (default: all). `header_row` is the 1-based sheet
+    row holding the column headers, for every sheet read (default 1); rows above it are not read
+    into bronze (they stay in the raw zone). Workbooks only. A positive int, not a bool.
+    """
 
     delimiter: str | None = None
     encoding: str = DEFAULT_ENCODING
     format: str | None = None
     sheets: tuple[str, ...] | None = None
+    header_row: int = 1
 
     def __post_init__(self) -> None:
+        validate_header_row(self.header_row)
         if self.delimiter is not None:
             validate_delimiter(self.delimiter)
         validate_encoding(self.encoding)
@@ -41,6 +48,15 @@ def validate_delimiter(delimiter: object) -> None:
         raise ValueError("delimiter must not be a quote or a newline")
     if len(delimiter.encode("utf-8")) != 1:
         raise ValueError("delimiter must be exactly one byte in UTF-8")
+
+
+def validate_header_row(header_row: object) -> None:
+    """Raise ValueError unless `header_row` is a positive int (bool is not accepted).
+
+    Messages never echo the value.
+    """
+    if isinstance(header_row, bool) or not isinstance(header_row, int) or header_row < 1:
+        raise ValueError("header_row must be a positive integer")
 
 
 def validate_encoding(encoding: object) -> None:
