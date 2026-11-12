@@ -24,7 +24,9 @@ import polars as pl
 
 from ingestion.csv_reader import DEFAULT_SEPARATOR, read_csv_as_strings
 from ingestion.detect import FileFormat, detect_format, validate_format
-from ingestion.metadata import add_bronze_metadata, hash_file
+from ingestion.excel_reader import read_workbook
+from ingestion.metadata import BRONZE_META_COLUMNS, add_bronze_metadata, hash_file
+from ingestion.parsed import ParsedPart
 from ingestion.raw_zone import SOURCE_PATTERN, landing_files, publish, receive_raw
 from ingestion.source_config import (
     CONFIG_ROOT,
@@ -60,7 +62,7 @@ class FileHeld(ValueError):
         self.reason = reason
 
 
-Reader = Callable[[Path, SourceConfig, str | None], pl.LazyFrame]
+Reader = Callable[[Path, SourceConfig, str | None], list[ParsedPart]]
 
 
 @dataclass(frozen=True)
@@ -116,12 +118,18 @@ def resolve_delimiter(path: Path, config: SourceConfig, flag: str | None) -> str
     return default
 
 
-def _read_delimited(path: Path, config: SourceConfig, flag: str | None) -> pl.LazyFrame:
+def _read_delimited(path: Path, config: SourceConfig, flag: str | None) -> list[ParsedPart]:
     separator = resolve_delimiter(path, config, flag)
-    return read_csv_as_strings(path, separator=separator, encoding=config.encoding)
+    frame = read_csv_as_strings(path, separator=separator, encoding=config.encoding)
+    return [ParsedPart(None, frame)]
 
 
-READERS: dict[FileFormat, Reader] = {FileFormat.DELIMITED: _read_delimited}
+READERS: dict[FileFormat, Reader] = {
+    FileFormat.DELIMITED: _read_delimited,
+    FileFormat.XLSX: read_workbook,
+    FileFormat.XLS: read_workbook,
+    FileFormat.ODS: read_workbook,
+}
 
 
 def _check_readable(
@@ -138,6 +146,27 @@ def _check_readable(
     return file_format
 
 
+def _with_metadata(
+    parts: list[ParsedPart], file_name: str, file_hash: str, run_at: datetime
+) -> pl.DataFrame:
+    """Add metadata to each part (own row numbering and sheet name), then stack them."""
+    frames = [
+        add_bronze_metadata(
+            part.frame,
+            file_name,
+            file_hash,
+            run_at,
+            first_row_number=part.first_row_number,
+            sheet_name=part.sheet_name,
+        ).collect()
+        for part in parts
+    ]
+    frame = frames[0] if len(frames) == 1 else pl.concat(frames, how="diagonal")
+    # Source columns first, metadata last, whatever order the sheets brought columns in.
+    source = [name for name in frame.columns if name not in BRONZE_META_COLUMNS]
+    return frame.select([*source, *BRONZE_META_COLUMNS])
+
+
 def _load_with_metadata(
     path: Path,
     file_hash: str,
@@ -151,8 +180,8 @@ def _load_with_metadata(
     Otherwise a file edited mid-read could leave `_file_hash` not matching the rows.
     """
     try:
-        source_rows = READERS[file_format](path, config, flag)
-        frame = add_bronze_metadata(source_rows, path.name, file_hash, run_at).collect()
+        parts = READERS[file_format](path, config, flag)
+        frame = _with_metadata(parts, path.name, file_hash, run_at)
     except UnicodeError:
         raise FileHeld(REASON_ENCODING, f"cannot decode {path.name}") from None
     if hash_file(path) != file_hash:

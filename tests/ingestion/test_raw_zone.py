@@ -10,6 +10,7 @@ from ingestion import bronze
 from ingestion.bronze import FileHeld, ingest_file, main, receive_raw
 from ingestion.detect import FileFormat, detect_format
 from ingestion.metadata import hash_file
+from ingestion.parsed import ParsedPart
 from ingestion.source_config import SourceConfig
 
 RUN_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -115,7 +116,7 @@ def test_flag_resolves_pending_txt(project: Path) -> None:
 def test_xlsx_saved_as_csv_is_detected_as_xlsx(project: Path) -> None:
     path = _xlsx_bytes(_landing(project) / "fake.csv")
     assert detect_format(path, SourceConfig()) is FileFormat.XLSX
-    assert main(["demo"]) == 3  # no Excel reader yet
+    assert main(["demo"]) == 1  # the Excel reader fails this stub workbook (not held)
     assert _bronze_files(project) == []
     assert len(_raw_files(project)) == 1
 
@@ -171,9 +172,9 @@ def test_dispatch_goes_through_readers_registry(
 ) -> None:
     calls: list[str] = []
 
-    def fake_reader(path: Path, config: SourceConfig, flag: str | None) -> pl.LazyFrame:
+    def fake_reader(path: Path, config: SourceConfig, flag: str | None) -> list[ParsedPart]:
         calls.append(path.name)
-        return pl.LazyFrame({"x": ["1"]})
+        return [ParsedPart(None, pl.LazyFrame({"x": ["1"]}))]
 
     monkeypatch.setitem(bronze.READERS, FileFormat.JSON, fake_reader)
     path = tmp_path / "a.csv"

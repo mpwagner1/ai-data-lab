@@ -7,12 +7,14 @@ dependencies = [
     "dbt-core>=1.12.6",
     "dbt-duckdb>=1.11.1",
     "duckdb>=2.0.0",
+    "fastexcel>=0.21.0",
     "polars>=2.1.0",
     "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
 dev = [
+    "openpyxl>=3.1.5",
     "pre-commit>=4.7.0",
     "pytest>=9.2.0",
     "ruff>=0.17.4",
