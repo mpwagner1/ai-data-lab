@@ -42,10 +42,38 @@ every source column a string, no casting or cleaning, no row data in logs.
 - **Per-source config.** Optional `config/sources/<source>.yaml` with `delimiter`, `encoding`, `format`,
   `sheets` and `header_row`. Unknown keys raise.
 - **Workbooks.** One Parquet file per workbook with all sheets combined (diagonal concat) and a new
-  `_sheet_name` metadata column (null for non-workbooks). `_row_number` is the row's position in the sheet as Excel shows it (see Header row).
-  Excel is read with `drop_empty_rows=False` and `drop_empty_cols=False` so no rows are silently
-  dropped. A blank header cell becomes `unnamed_<n>`, the one documented rename, because the source
-  supplied no name and `_`-prefixed names are reserved.
+  `_sheet_name` metadata column (null for non-workbooks). `_row_number` is the row's position in the
+  sheet as Excel shows it (see Header row). The `fastexcel` reader used here (calamine) has no
+  `drop_empty_rows` or `drop_empty_cols` options, and its own `header_row=0` silently skips leading
+  blank rows, which would break sheet-row numbering. So the reader loads each sheet with
+  `header_row=None, skip_rows=0` (row `i` of the frame is sheet row `i + 1`, nothing is dropped) and
+  applies the header row itself.
+  - **Headers.** A blank header cell becomes `unnamed_<n>` (`n` is the 1-based position among the
+    columns read), the one documented rename, because the source supplied no name and `_`-prefixed
+    names are reserved. A header that starts with `_`, or two headers that are equal, **fail the
+    file** with an error naming the error type and file only; they are never renamed. This is
+    stricter than the delimited reader, which lets Polars suffix duplicates, because renaming
+    would change source names. There is no config key to work around it; fix the source or add a
+    reader option in a later change. Case-only duplicates pass the check and still read back
+    through DuckDB.
+  - **Value forms.** Cells arrive as strings in calamine's form, not always the text Excel shows.
+    A stored `1.234567890123457e+19` arrives as `'12345678901234569216'` (the same double written
+    out in full), dates and datetimes as `YYYY-MM-DD HH:MM:SS` (date versus datetime is lost),
+    and formulas as their cached value or null when none was stored. Our code does not cast,
+    round or reformat. The original workbook stays in the raw zone.
+  - **Limits.** Calamine drops leading blank columns, so `unnamed_<n>` is relative to the first
+    used column, not column A, and trailing blank rows are not emitted. Hidden sheets are read.
+    Merged ranges fill only their top-left cell. Every sheet is loaded and collected in memory
+    with no row or size cap (caps come with archives in task 5). A sheet with no cells is skipped,
+    and a workbook with no sheet that has cells fails.
+  - **Failures.** A corrupt, truncated or password-protected workbook, a `sheets:` name that is
+    not in the workbook, and a `header_row` past the end of a sheet fail that file (exit 1, raw copy
+    kept, the rest of the batch continues). They are not held. Messages and logs never carry
+    sheet names, headers or cell values; the per-sheet `bronze_sheet` log line carries the
+    1-based sheet index, `header_row`, the skipped-row count and the row count.
+  - **Detection.** A zip that is broken but has extension `.xlsx`, `.xlsm` or `.ods` is detected
+    as that workbook (so it fails instead of being held as an archive). A non-Excel OLE file now fails
+    instead of being held as `no_reader`.
 - **Header row (workbooks).** Real sheets often start with blank or title rows above the headers.
   `header_row: <n>` in the source config (1-based, default 1, applies to every sheet read) names the
   sheet row that holds the column headers; the rows above it are not read into bronze. The skipped
