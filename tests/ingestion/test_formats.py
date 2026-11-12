@@ -238,3 +238,75 @@ def test_semicolon_flag_works_on_txt(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert main(["demo", "--delimiter", ";"]) == 0
 
     assert _ids(tmp_path / "lake") == ["001", "002"]
+
+
+@pytest.mark.parametrize(("name", "sep"), [("a.csv", ","), ("a.tsv", "\t"), ("a.psv", "|")])
+@pytest.mark.parametrize("flag", [";", "|", "\t"])
+def test_delimiter_flag_is_ignored_for_files_with_an_extension_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, sep: str, flag: str
+) -> None:
+    landing = _landing(tmp_path, monkeypatch)
+    _write(landing / name, sep)
+
+    assert main(["demo", "--delimiter", flag]) == 0
+
+    assert _ids(tmp_path / "lake") == ["001", "002"]
+    assert list(_bronze(tmp_path / "lake").columns[:2]) == ["id", "code"]
+
+
+def test_header_only_non_utf8_file_loads_as_zero_rows_with_its_columns(tmp_path: Path) -> None:
+    path = tmp_path / "a.csv"
+    path.write_bytes("id,café\n".encode("cp1252"))
+
+    result = ingest_file(
+        path, "demo", tmp_path / "lake", config=SourceConfig(encoding="cp1252"), run_at=RUN_AT
+    )
+
+    frame = _bronze(tmp_path / "lake")
+    assert (result.rows, frame.height) == (0, 0)
+    assert frame.columns[:2] == ["id", "café"]
+
+
+@pytest.mark.parametrize("encoding", ["cp1252", "utf-16", "utf-16-le", "utf-16-be", "utf-32-le"])
+def test_flag_delimiter_and_config_encoding_work_together_on_txt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoding: str
+) -> None:
+    landing = _landing(tmp_path, monkeypatch)
+    (landing / "a.txt").write_bytes("id|name\n001|café\n002|zoë\n".encode(encoding))
+    config = tmp_path / "config" / "sources"
+    config.mkdir(parents=True)
+    (config / "demo.yaml").write_text(f"encoding: {encoding}\n")
+
+    assert main(["demo", "--delimiter", "|"]) == 0
+
+    frame = _bronze(tmp_path / "lake")
+    assert frame["id"].to_list() == ["001", "002"]
+    assert frame["name"].to_list() == ["café", "zoë"]
+
+
+def test_config_delimiter_and_encoding_work_together_on_dat(tmp_path: Path) -> None:
+    path = tmp_path / "a.dat"
+    path.write_bytes("id;name\n001;café\n".encode("utf-16-le"))
+    config = SourceConfig(delimiter=";", encoding="utf-16-le")
+
+    ingest_file(path, "demo", tmp_path / "lake", config=config, run_at=RUN_AT)
+
+    assert _bronze(tmp_path / "lake")["name"].to_list() == ["café"]
+
+
+@pytest.mark.parametrize("bom", [b"\xff\xfe", b"\xfe\xff"], ids=["bom_le", "bom_be"])
+def test_cli_loads_utf16_file_with_bom_and_keeps_header_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bom: bytes
+) -> None:
+    landing = _landing(tmp_path, monkeypatch)
+    order = "utf-16-le" if bom == b"\xff\xfe" else "utf-16-be"
+    (landing / "a.csv").write_bytes(bom + "id,code\n001,A1\n".encode(order))
+    config = tmp_path / "config" / "sources"
+    config.mkdir(parents=True)
+    (config / "demo.yaml").write_text("encoding: utf-16\n")
+
+    assert main(["demo"]) == 0
+
+    frame = _bronze(tmp_path / "lake")
+    assert frame.columns[:2] == ["id", "code"]  # the BOM is not part of the first column name
+    assert frame["id"].to_list() == ["001"]

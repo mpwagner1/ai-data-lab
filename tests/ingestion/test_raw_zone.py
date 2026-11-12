@@ -542,3 +542,40 @@ def test_symlink_to_target_inside_landing_is_skipped_and_counted(
     assert received == ["real.csv"]  # the alias is never opened or copied under its own name
     assert "symlinks=1" in caplog.text
     assert "alias.csv" not in caplog.text
+
+
+# Issue #33 item 2. The tests below PIN what the code does today. A symlinked landing folder and
+# a symlink handed to the public `ingest_file` ARE followed; the names say so, so a later fix
+# that refuses them turns these red on purpose and the pin is updated in that change.
+def test_symlinked_landing_folder_is_followed_today(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    real = project / "elsewhere"
+    real.mkdir()
+    (real / "a.csv").write_text(f"id,code\n1,{SECRET}\n")
+    landing = _landing(project)
+    landing.rmdir()
+    landing.symlink_to(real, target_is_directory=True)
+    caplog.set_level(logging.INFO)
+
+    code = main(["demo"])
+
+    assert code == 0  # followed: the file behind the link was received and parsed
+    assert len(_raw_files(project)) == 1
+    assert len(_bronze_files(project)) == 1
+    assert SECRET not in caplog.text
+
+
+def test_ingest_file_given_a_symlink_path_follows_it_today(project: Path) -> None:
+    target = project / "elsewhere.csv"
+    target.write_text("id,code\n1,A\n")
+    link = _landing(project) / "link.csv"
+    link.symlink_to(target)
+
+    result = ingest_file(link, "demo", project / "lake", run_at=RUN_AT)
+
+    assert result.rows == 1  # followed
+    assert result.file_hash == hash_file(target)
+    frame = pl.read_parquet(_bronze_files(project)[0])
+    assert frame["_file_name"].to_list() == ["link.csv"]
+    assert _raw_files(project) == []  # ingest_file never touches the raw zone
