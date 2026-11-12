@@ -60,17 +60,53 @@ def _is_garbage_char(char: str) -> bool:
     return char == "\ufffd" or unicodedata.category(char) in {"Cc", "Cn", "Co", "Cs"}
 
 
+def _wrong_byte_order(sample: bytes, codec: str) -> bool:
+    """True if an explicit-endian UTF-16/32 sample has its NUL bytes where the low byte should be.
+
+    ASCII-range text has NUL in the high-order bytes of each code unit. If the NULs sit in the
+    low-order byte instead, the bytes were written in the opposite order.
+    """
+    size = 2 if codec.startswith("utf-16") else 4
+    sample = sample[: len(sample) - len(sample) % size]
+    if not sample:
+        return False
+    low_at = size - 1 if codec.endswith("-be") else 0
+    units = len(sample) // size
+    low_nuls = sample[low_at::size].count(0)
+    high_nuls = sample.count(0) - low_nuls
+    return low_nuls / units > high_nuls / (units * (size - 1))
+
+
 def _check_decoded(raw: bytes, text: str, encoding: str) -> None:
     """Raise UnicodeError if a non-UTF-8 decode looks wrong (wrong codec or byte order).
 
-    A wrong UTF-16/32 byte order or codec can decode "successfully" into nonsense. Plain
-    `utf-16`/`utf-32` must start with a BOM (otherwise the byte order is a guess). The start of
-    the text must have no replacement, control, unassigned or private-use characters. Values are
-    only inspected, never changed. Messages carry no file content.
+    A wrong codec can decode "successfully" into nonsense, so the decode is checked:
+
+    - UTF-16/32 (plain or explicit-endian): real text of any realistic file has NUL bytes
+      (a newline code unit contains one), so bytes with no NUL are UTF-8 or other single-byte
+      text read with the wrong codec. Plain `utf-16`/`utf-32` must also start with a BOM.
+    - Explicit-endian UTF-16/32: NUL bytes must sit in the high-order byte (wrong byte order
+      is held, including a header-only file with no newline).
+    - A UTF-8 BOM read with any codec other than `utf-8-sig` is held (it would otherwise leak
+      into the first column name).
+    - The first line must have no replacement, control, unassigned or private-use characters.
+      This uses Python's `unicodedata` (Python 3.12 is Unicode 15.0), so a very new character in
+      a UTF-16 header can cause a visible false hold; that is accepted.
+
+    Cannot be detected: general mojibake (for example `cafÃ©`), and genuine UTF-16/32 text
+    with no NUL byte at all (for example CJK only), which is held. Values are only inspected,
+    never changed. Messages carry no file content.
     """
-    boms = _BOM_ENCODINGS.get(codecs.lookup(encoding).name)
-    if boms is not None and not raw.startswith(boms):
-        raise UnicodeDecodeError(encoding, b"", 0, 1, "no BOM")
+    codec = codecs.lookup(encoding).name
+    if raw.startswith(codecs.BOM_UTF8) and codec != "utf-8-sig":
+        raise UnicodeDecodeError(encoding, b"", 0, 1, "UTF-8 BOM")
+    if codec.startswith(("utf-16", "utf-32")):
+        if b"\x00" not in raw:
+            raise UnicodeDecodeError(encoding, b"", 0, 1, "no NUL bytes")
+        if codec in _BOM_ENCODINGS and not raw.startswith(_BOM_ENCODINGS[codec]):
+            raise UnicodeDecodeError(encoding, b"", 0, 1, "no BOM")
+        if codec.endswith(("-le", "-be")) and _wrong_byte_order(raw[:_HEADER_CHARS], codec):
+            raise UnicodeDecodeError(encoding, b"", 0, 1, "byte order")
     header = text[:_HEADER_CHARS].split("\n", 1)[0].removeprefix("\ufeff").rstrip("\r")
     if any(_is_garbage_char(char) for char in header):
         raise UnicodeDecodeError(encoding, b"", 0, 1, "implausible header")
