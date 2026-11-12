@@ -24,7 +24,9 @@ import polars as pl
 from ingestion.csv_reader import DEFAULT_SEPARATOR, read_csv_as_strings
 from ingestion.detect import FileFormat, detect_format, validate_format
 from ingestion.excel_reader import read_workbook
+from ingestion.json_reader import read_json, read_ndjson
 from ingestion.metadata import hash_file, with_metadata
+from ingestion.parquet_reader import read_parquet_as_strings
 from ingestion.parsed import ParsedPart
 from ingestion.raw_zone import SOURCE_PATTERN, landing_files, publish, receive_raw
 from ingestion.source_config import (
@@ -127,6 +129,9 @@ READERS: dict[FileFormat, Reader] = {
     FileFormat.XLSX: read_workbook,
     FileFormat.XLS: read_workbook,
     FileFormat.ODS: read_workbook,
+    FileFormat.JSON: read_json,
+    FileFormat.NDJSON: read_ndjson,
+    FileFormat.PARQUET: read_parquet_as_strings,
 }
 
 
