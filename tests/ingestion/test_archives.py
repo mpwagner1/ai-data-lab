@@ -3,15 +3,18 @@ import hashlib
 import io
 import logging
 import struct
+import tarfile
+import tempfile
 import traceback
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import openpyxl
 import polars as pl
 import pytest
 
-from ingestion import archives
+from ingestion import archives, bronze
 from ingestion.archives import ArchiveReadError, expand_archive
 from ingestion.bronze import main
 
@@ -107,33 +110,96 @@ def test_zip_saved_with_csv_extension_is_still_a_zip(project: Path) -> None:
     assert _names(project) == {"data.csv!in.csv"}
 
 
-def test_hostile_member_names_cannot_escape(project: Path) -> None:
-    long_name = "n" * 300 + ".csv"
-    members = {
-        "../x.csv": b"id\n1\n",
-        "/etc/x.csv": b"id\n2\n",
-        "a/../../x.csv": b"id\n3\n",
-        "C:\\x.csv": b"id\n4\n",
-        "..\\..\\y.csv": b"id\n5\n",
-        long_name: b"id\n6\n",
-        "nul.csv\x00.exe": b"id\n7\n",
-    }
-    _zip(_landing(project) / "evil.zip", members)
-    before = {p for p in project.parent.glob("*")}
+HOSTILE_NAMES = [
+    "../x.csv",
+    "/etc/x.csv",
+    "a/../../x.csv",
+    "C:\\x.csv",
+    "..\\..\\y.csv",
+    "n" * 300 + ".csv",
+    "nul.csv\x00.exe",
+    "\\\\server\\share\\x.csv",
+    "line\nbreak\x01\x1b[31m.csv",
+    "member-1.csv",
+    "A.csv",
+    "a.csv",
+]
+
+
+@pytest.fixture
+def temp_root(project: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect the system temp root into the test tree, as a sibling of the lake and landing."""
+    root = project / "systmp"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    for variable in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.setenv(variable, str(root))
+    return root
+
+
+def _spy_on_extraction(
+    monkeypatch: pytest.MonkeyPatch, project: Path, temp_root: Path
+) -> list[set[Path]]:
+    """Snapshot everything outside the lake while each member sits extracted on disk.
+
+    Extracted files are deleted again, so only a look taken during the run can see a write that
+    went to the wrong place.
+    """
+    real = bronze.ingest_file
+    snapshots: list[set[Path]] = []
+
+    def spy(path: Path, *args: object, **kwargs: object) -> object:
+        snapshots.append(
+            {p.relative_to(project) for p in project.rglob("*") if "lake" not in p.parts}
+        )
+        assert path.parent.parent == temp_root
+        return real(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(bronze, "ingest_file", spy)
+    return snapshots
+
+
+def test_hostile_member_names_cannot_escape(
+    project: Path, temp_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    members = {name: f"id\n{i}\n".encode() for i, name in enumerate(HOSTILE_NAMES)}
+    archive = _zip(_landing(project) / "evil.zip", members)
+    snapshots = _spy_on_extraction(monkeypatch, project, temp_root)
 
     assert main(["demo"]) == 0
 
-    assert sorted(_frames(project)["id"].to_list()) == ["1", "2", "3", "4", "5", "6", "7"]
-    assert "evil.zip!../x.csv" in _names(project)
-    assert f"evil.zip!{long_name}" in _names(project)
-    assert {p for p in project.parent.glob("*")} == before
-    assert not (project.parent / "x.csv").exists()
-    assert not (project.parent / "y.csv").exists()
-    assert not Path("/etc/x.csv").exists()
-    inside = {p.relative_to(project).parts[0] for p in project.rglob("*") if p.is_file()}
-    assert inside <= {"data", "lake"}
-    stray = [p for p in project.rglob("*") if p.is_file() and p.name.startswith("member-")]
-    assert stray == []
+    assert len(snapshots) == len(members)
+    for seen in snapshots:  # (a') while a member is on disk, only its private dir holds it
+        in_temp = {p for p in seen if p.parts[0] == "systmp"}
+        assert {p.parts[0] for p in seen} == {"data", "systmp"}
+        assert len(in_temp) == 3  # systmp, the private dir, one generated member file
+        assert {p.parts[2][:7] for p in in_temp if len(p.parts) == 3} == {"member-"}
+
+    stored = {f"evil.zip!{name.split(chr(0))[0]}" for name in members}
+    assert _names(project) == stored
+    assert sorted(_frames(project)["id"].to_list()) == sorted(str(i) for i in range(len(members)))
+    # (a) nothing exists outside the lake, the landing folder, the raw zone and the temp root
+    everything = {p.relative_to(project) for p in project.rglob("*")}
+    assert {p.parts[0] for p in everything} == {"data", "lake", "systmp"}
+    assert {p for p in everything if p.parts[0] == "data"} == {
+        Path("data"),
+        Path("data/landing"),
+        Path("data/landing/demo"),
+        Path("data/landing/demo/evil.zip"),
+    }
+    assert not list(project.parent.glob("x.csv")) + list(project.parent.glob("y.csv"))
+    # (b) the redirected temp root is empty: the private directory was removed
+    assert list(temp_root.iterdir()) == []
+    # (c) the lake holds exactly the raw archive copy and one parquet file per member
+    lake_files = {p for p in (project / "lake").rglob("*") if p.is_file()}
+    hashes = {hashlib.sha256(data).hexdigest() for data in members.values()}
+    parquet = {p for p in lake_files if p.suffix == ".parquet"}
+    assert {p.name[:64] for p in parquet} == hashes
+    assert len(parquet) == len(members)
+    assert lake_files - parquet == {
+        next((project / "lake" / "raw" / "demo").glob("receive_date=*/*.zip"))
+    }
+    assert archive.exists()
 
 
 def test_symlink_directory_hidden_and_macosx_members_are_ignored(
@@ -242,24 +308,6 @@ def test_gzip_bomb_is_caught_while_streaming(
     assert main(["demo"]) == 1
     assert _bronze_count(project) == 0
     assert _raw_count(project) == 1
-
-
-def test_understated_header_size_does_not_defeat_the_cap(
-    project: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    path = _zip(_landing(project) / "lie.zip", {"a.csv": b"id\n" + b"1\n" * 5000})
-    data = bytearray(path.read_bytes())
-    local = data.find(b"PK\x03\x04")
-    central = data.find(b"PK\x01\x02")
-    struct.pack_into("<I", data, local + 22, 3)
-    struct.pack_into("<I", data, central + 24, 3)
-    path.write_bytes(data)
-    monkeypatch.setattr(archives, "MAX_MEMBER_BYTES", 100)
-    (_landing(project) / "z.csv").write_text("id\n7\n")
-
-    assert main(["demo"]) == 1
-
-    assert _names(project) == {"z.csv"}
 
 
 def _patched(path: Path, offset_central: int, fmt: str, value: int, offset_local: int) -> None:
@@ -399,3 +447,253 @@ def test_expand_extracts_only_to_generated_names_and_cleans_up(tmp_path: Path) -
     assert seen == [(1, "member-1.csv", "../../evil.csv"), (2, "member-2", "x/y.weird")]
     assert not unit.path.exists()
     assert not unit.path.parent.exists()
+
+
+def _drain(path: Path, is_gzip: bool) -> tuple[list[int], ArchiveReadError | None]:
+    """Indexes of the units yielded before the archive failed, and the failure if any."""
+    seen: list[int] = []
+    try:
+        for unit in expand_archive(path, is_gzip):
+            seen.append(unit.index)
+    except ArchiveReadError as error:
+        return seen, error
+    return seen, None
+
+
+class _EndlessSource:
+    """A binary reader that yields far more bytes than anything declared about it."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def read(self, size: int) -> bytes:
+        self.reads += 1
+        assert self.reads < 1000, "the cap never tripped"
+        return b"0" * min(size, 10)
+
+
+def test_streaming_copy_trips_the_cap_on_actual_bytes_not_declared_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # zipfile stops a member at its declared size, so a zip cannot over-deliver. The copy
+    # function is the place that must count what actually arrives.
+    monkeypatch.setattr(archives, "MAX_MEMBER_BYTES", 100)
+    source = _EndlessSource()
+    budget = archives._Budget(tmp_path / "x.zip")
+
+    with pytest.raises(ArchiveReadError, match="member too large"):
+        archives._stream_to_file(source, tmp_path / "out", budget)  # type: ignore[arg-type]
+
+    assert source.reads == 11
+
+
+def test_zip_member_far_over_the_cap_with_a_tiny_compressed_size_is_caught(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(archives, "MAX_MEMBER_BYTES", 1000)
+    path = _zip(tmp_path / "z.zip", {"a.csv": b"0" * 3_000_000})
+    assert path.stat().st_size < 3_000_000 // 100  # honest headers, tiny on disk
+
+    seen, error = _drain(path, False)
+
+    assert seen == []
+    assert error is not None
+    assert "member too large" in str(error)
+
+
+def test_zip_total_cap_trips_on_the_member_that_crosses_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(archives, "MAX_MEMBER_BYTES", 100)
+    monkeypatch.setattr(archives, "MAX_TOTAL_UNCOMPRESSED_BYTES", 100)
+    members = {f"{n}.csv": b"id\n" + bytes([48 + n]) * 37 for n in range(3)}  # 40 bytes each
+    path = _zip(tmp_path / "z.zip", members)
+
+    seen, error = _drain(path, False)
+
+    assert seen == [1, 2]
+    assert error is not None
+    assert "archive too large" in str(error)
+
+
+@pytest.mark.parametrize("trailer", ["wrong_size", "no_size", "no_trailer"])
+def test_gzip_over_the_cap_is_caught_whatever_its_trailer_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trailer: str
+) -> None:
+    monkeypatch.setattr(archives, "MAX_MEMBER_BYTES", 1000)
+    data = gzip.compress(b"0" * 3_000_000)
+    cut = {
+        "wrong_size": data[:-4] + struct.pack("<I", 3),
+        "no_size": data[:-4],
+        "no_trailer": data[:-8],
+    }[trailer]
+    path = tmp_path / "a.csv.gz"
+    path.write_bytes(cut)
+
+    seen, error = _drain(path, True)
+
+    assert seen == []
+    assert error is not None
+    assert "member too large" in str(error)
+
+
+def _raw_files(project: Path) -> list[Path]:
+    return list((project / "lake" / "raw" / "demo").glob("receive_date=*/*"))
+
+
+def test_temp_dir_is_cleaned_after_oserror_mid_copy(
+    project: Path, temp_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    def fail_on_second_chunk(self: archives._Budget, size: int) -> None:
+        calls.append(size)
+        if len(calls) == 2:
+            raise OSError(28, "no space left")
+
+    monkeypatch.setattr(archives._Budget, "add", fail_on_second_chunk)
+    (_landing(project) / "big.csv.gz").write_bytes(gzip.compress(b"0" * 3_000_000))
+
+    assert main(["demo"]) == 1
+
+    assert len(calls) == 2  # it really failed mid-stream, after a partial file was written
+    assert list(temp_root.iterdir()) == []
+
+
+def test_temp_dir_is_cleaned_after_keyboard_interrupt_in_the_consumer(
+    project: Path, temp_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupt(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ingestion.bronze.ingest_file", interrupt)
+    _zip(_landing(project) / "pack.zip", {"a.csv": b"id\n1\n", "b.csv": b"id\n2\n"})
+
+    with pytest.raises(KeyboardInterrupt):
+        main(["demo"])
+
+    assert list(temp_root.iterdir()) == []
+    assert len(_raw_files(project)) == 1  # the raw copy was made before the interrupt
+
+
+@pytest.mark.parametrize("name", ["logs.tar.gz", "logs.tgz"])
+def test_tar_gz_is_held_as_no_reader_and_never_expanded(
+    project: Path, caplog: pytest.LogCaptureFixture, name: str
+) -> None:
+    inner = project / "in.csv"
+    inner.write_text("id\n1\n")
+    path = _landing(project) / name
+    with tarfile.open(path, "w:gz") as tar:
+        tar.add(inner, arcname="in.csv")
+    caplog.set_level(logging.INFO)
+
+    assert main(["demo"]) == 3
+
+    assert _bronze_count(project) == 0
+    assert caplog.text.count('reason="no_reader"') == 1
+    assert [p.read_bytes() for p in _raw_files(project)] == [path.read_bytes()]
+
+
+def _members(count: int) -> dict[str, bytes]:
+    return {f"m{i}.csv": f"id\n{i}\n".encode() for i in range(count)}
+
+
+def test_exactly_max_members_loads(project: Path) -> None:
+    assert archives.MAX_MEMBERS == 100  # the real constant; this test pins its boundary
+    _zip(_landing(project) / "pack.zip", _members(archives.MAX_MEMBERS))
+
+    assert main(["demo"]) == 0
+
+    assert _bronze_count(project) == archives.MAX_MEMBERS
+
+
+def test_one_more_than_max_members_fails_the_archive(project: Path) -> None:
+    _zip(_landing(project) / "pack.zip", _members(archives.MAX_MEMBERS + 1))
+
+    assert main(["demo"]) == 1
+
+    assert _bronze_count(project) == 0
+    assert len(_raw_files(project)) == 1
+
+
+def test_one_more_than_max_members_says_too_many_members(tmp_path: Path) -> None:
+    path = _zip(tmp_path / "pack.zip", _members(archives.MAX_MEMBERS + 1))
+
+    seen, error = _drain(path, False)
+
+    assert seen == []
+    assert error is not None
+    assert "too many members" in str(error)
+
+
+def _good_zip(path: Path) -> None:
+    _zip(path, {"a.csv": b"id\n1\n"})
+
+
+def _bad_zip(path: Path) -> None:
+    _broken_zip("crc", path)
+
+
+def _good_gz(path: Path) -> None:
+    path.write_bytes(gzip.compress(b"id\n1\n"))
+
+
+def _bad_gz(path: Path) -> None:
+    path.write_bytes(gzip.compress(b"id\n1\n")[:-6] + b"zzzzzz")
+
+
+@pytest.mark.parametrize(
+    ("name", "build", "exit_code"),
+    [
+        ("ok.zip", _good_zip, 0),
+        ("bad.zip", _bad_zip, 1),
+        ("ok.csv.gz", _good_gz, 0),
+        ("bad.csv.gz", _bad_gz, 1),
+    ],
+)
+def test_raw_copy_of_an_archive_is_byte_equal_to_the_landing_archive(
+    project: Path, name: str, build: Callable[[Path], None], exit_code: int
+) -> None:
+    path = _landing(project) / name
+    build(path)
+    landing_bytes = path.read_bytes()
+
+    assert main(["demo"]) == exit_code
+
+    assert [p.read_bytes() for p in _raw_files(project)] == [landing_bytes]
+    assert path.read_bytes() == landing_bytes
+
+
+def test_format_in_source_config_reads_the_archive_as_that_format_without_expanding(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config = project / "config" / "sources"
+    config.mkdir(parents=True)
+    (config / "demo.yaml").write_text("format: delimited\n")
+    path = _zip(_landing(project) / "pack.zip", {"a.csv": b"id\n1\n"})
+    caplog.set_level(logging.INFO)
+
+    code = main(["demo"])
+
+    # The zip bytes go to the delimited reader (which holds them), not to the expander: no
+    # member is read, no "!" name exists, and the raw copy stays.
+    assert code == 3
+    assert "event=bronze_unparsed" in caplog.text
+    assert "bronze_ignored" not in caplog.text
+    assert _bronze_count(project) == 0
+    assert [p.read_bytes() for p in _raw_files(project)] == [path.read_bytes()]
+
+
+def test_gz_whose_content_is_a_zip_is_held_as_no_reader(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    inner = _zip(project / "inner.zip", {"a.csv": b"id\n1\n"})
+    path = _landing(project) / "inner.zip.gz"
+    path.write_bytes(gzip.compress(inner.read_bytes()))
+    caplog.set_level(logging.INFO)
+
+    assert main(["demo"]) == 3
+
+    assert _bronze_count(project) == 0
+    assert caplog.text.count('reason="no_reader"') == 1
+    assert [p.read_bytes() for p in _raw_files(project)] == [path.read_bytes()]
