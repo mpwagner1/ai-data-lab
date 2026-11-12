@@ -2,8 +2,8 @@
 
 Date: 2026-11-12
 Status: Accepted (approved by Michael 2026-11-12, with the `_sheet_name` column and `--delimiter` flag).
-Amended 2026-11-12: `header_row` config key and sheet-row `_row_number` for workbooks (below); detection wording
-matched to the code.
+Amended 2026-11-12: `header_row` config key and sheet-row `_row_number` for workbooks, detection wording
+matched to the code, and archive handling (caps, failure rules, member safety) as built.
 
 ## Context
 
@@ -89,9 +89,54 @@ every source column a string, no casting or cleaning, no row data in logs.
   empty rows inside the data keep their numbers. This differs from delimited files, where
   `_row_number` is the 1-based position among data rows (the header is not counted). Both are
   documented in `contracts/bronze/_metadata.yaml`; bronze files already written are not changed.
-- **Archives.** `.gz` and `.zip` are expanded; each member is its own unit with its own hash and
-  `_file_name = "<archive>!<member>"`. Caps on total uncompressed size and member count, member names
-  never used as paths, nested archives not expanded.
+- **Archives.** `.zip` and `.gz` are expanded (standard library `zipfile` and `gzip`, no new
+  dependency). The archive itself is copied once, unchanged, to the raw zone (also when it later
+  fails); members are not stored separately. Each member is its own unit: its own hash (SHA-256 of
+  the member bytes), its own bronze Parquet file through the normal atomic write, its own skip, and
+  `_file_name = "<archive>!<member>"` (a `.gz` has one member named after the archive without
+  `.gz`, for example `orders.csv.gz!orders.csv`). No metadata column was added.
+  - **Members are untrusted.** A member name, size or content can be hostile. A name is stored only
+    as data in `_file_name`. It is never used, even in part, to build a path: each member is
+    streamed to a private `tempfile.TemporaryDirectory` (mode 0700) under a generated name,
+    `member-<index>` plus an extension from a fixed whitelist (`.csv .tsv .psv .txt .dat .json
+    .ndjson .jsonl .xlsx .xlsm .xls .ods .parquet`, anything else gets none). So `../x`, absolute
+    paths, backslashes, drive letters, UNC paths, NULs, very long names and control characters
+    cannot escape. Names never appear in logs or exception messages: logs use `<archive>!#<index>`
+    and the member hash. Directory entries, names starting with `.` or `~$`, `__MACOSX/` entries
+    and symlink entries are skipped and counted in one line, `bronze_ignored members=N symlinks=K`
+    (counts only, written only when N is above 0).
+  - **Caps** (module constants, no config keys): `MAX_MEMBERS = 100` per archive,
+    `MAX_TOTAL_UNCOMPRESSED_BYTES = 512 MiB` per archive, `MAX_MEMBER_BYTES = 256 MiB` per member.
+    They are enforced on the bytes actually decompressed while streaming, not on the sizes in the
+    zip headers (headers can lie), so a gzip bomb, a high-ratio zip and concatenated gzip streams
+    are stopped as they grow. The member count, encryption and unsupported compression methods
+    are checked from the zip's central directory before anything is written. Supported
+    compression: stored, deflate, bzip2 and lzma; any other method fails the archive.
+  - **Failures.** A corrupt, truncated, bad-CRC, encrypted or unsupported archive, an exceeded cap,
+    or a gzip with trailing non-zero garbage fails the archive: exit 1, raw copy kept, the rest of
+    the batch continues, and it is not held. Errors are `ArchiveReadError` (a `ValueError`) naming
+    the error type and the archive file only, raised outside the `except` block so `__context__`
+    and `__cause__` are `None`. Checks up front write nothing. A failure mid-stream (a byte cap, a
+    bad CRC) leaves members already completed in place, because each member is its own atomic
+    unit; the failing member and later ones are not written. Temp files are removed on every
+    failure path.
+  - **Members follow the normal rules.** Each member is detected and read like a landing file
+    (`format:` config, then signature, then text heuristics, with the extension from the
+    whitelist), and the source config and `--delimiter` apply. A member that needs config, has no
+    reader or has an encoding problem is held; a member with corrupt content fails; other members
+    still load. Exit precedence stays 2, then 1, then 3, then 0.
+  - **Nested and other archives are never expanded.** A member that is itself a zip or gzip is
+    held as `no_reader` (exit 3). So are `.tar`, `.tar.gz`, `.tgz`, `.7z` and `.rar`. If
+    `format:` is set in the source config, it replaces detection and the archive is read as that
+    format, not expanded.
+  - **Reruns.** A member whose hash already has a bronze file is skipped, so a rerun skips every
+    member. The skip is by content: an identical member in a second archive is skipped too, and
+    its `_file_name` is that of whichever archive loaded first. A rerun still re-reads archives
+    whose members are all ingested, because the skip is per member hash and needs the member
+    bytes; the caps bound the cost.
+  - **`--pending`** expands archives too, read-only: it extracts to a temp directory outside the
+    lake, writes nothing, and lists pending members by archive name and member index. A broken
+    archive is listed as one pending item with `reason=archive_error` and counts toward exit 3.
 - **Metadata contract.** `_sheet_name` (string, the sheet a row came from, null for files that are not
   workbooks) is a fifth metadata column, added to `contracts/bronze/_metadata.yaml`. Older bronze files
   read back with null `_sheet_name` via `union_by_name`, so no migration.
@@ -105,7 +150,11 @@ every source column a string, no casting or cleaning, no row data in logs.
 - The raw zone roughly doubles storage.
 - Excel stores `001` as the number 1, so the leading zeros are already gone in the file. Numbers come
   back in calamine's string form (for example `1.0`). The raw zone keeps the original bytes.
-- Excel and JSON are read into memory, not streamed.
+- Excel, JSON arrays and Parquet are read into memory, not streamed (NDJSON and CSV are streamed).
+  Archive members are streamed to disk under the caps above, but each member is then read by its
+  own reader.
+- Archives add one more decompression pass per rerun and a temp directory per run; the raw zone
+  holds only the archive, so a corrupt member is fixed by reprocessing from it.
 - Fixed-width, EBCDIC, PDF and proprietary binaries need a spec from the customer and stay pending
   until a reader exists. Fixed-width is the planned follow-up, configured with column positions.
 - The single-writer and hard-link assumptions from ADR 0001 still apply, including to the raw zone.
