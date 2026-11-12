@@ -26,13 +26,15 @@ every source column a string, no casting or cleaning, no row data in logs.
   Metadata, hashing, the re-hash check, the atomic write and logging are shared.
 - **Detection.** Order: `format:` in config, then file signature (`PK` zip container → xlsx or ods or
   archive, `D0CF11E0` xls, `PAR1` Parquet, `1F8B` gzip), then text heuristics (JSON array, NDJSON,
-  else delimited). A delimited file's delimiter comes from config, then extension (`.csv` comma,
-  `.tsv` tab, `.psv` pipe). There is **no delimiter sniffing**: an unknown `.txt` or `.dat` is held with
+  else delimited). A delimited file's delimiter comes from the `--delimiter` flag (only for files with
+  no extension default), then config, then extension (`.csv` comma, `.tsv` tab, `.psv` pipe). There is
+  **no delimiter sniffing**: an unknown `.txt` or `.dat` with none of those is held with
   `reason=needs_config`.
 - **`--delimiter` flag.** `python -m ingestion.bronze <source> --delimiter '|'` supplies the delimiter
   for delimited files that have no extension default (`.txt`, `.dat`). It must be a single character.
-  A `delimiter:` in the source config takes precedence, and the flag never overrides an extension
-  default (a `.csv` stays comma). With no flag and no config, such a file is still held with
+  The flag wins over a `delimiter:` in the source config (the usual rule: command line beats config),
+  but it only applies to those files, so a `.csv` in the same folder stays comma. With no flag and no
+  config, such a file is still held with
   `reason=needs_config` and the run exits 3. The flag is not stored, so a later run without it holds the
   file again only if it is still pending.
 - **Per-source config.** Optional `config/sources/<source>.yaml` with `delimiter`, `encoding`, `format`

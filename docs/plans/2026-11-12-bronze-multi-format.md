@@ -31,13 +31,13 @@ Full rationale is in `docs/decisions/0002-bronze-multi-format.md`.
 - **Pending is derived:** a raw file is pending when no bronze Parquet starts with its hash. Every run
   parses everything pending, so replay is automatic.
 - **Detection:** `format:` config, then file signature, then text heuristics. Delimited files get their
-  delimiter from config, then extension. An unknown `.txt` or `.dat` is held, not guessed.
+  delimiter from the flag (no-default extensions only), then config, then extension. An unknown `.txt` or `.dat` is held, not guessed.
 - **Readers:** `READERS: dict[FileFormat, Reader]`, each returning `list[ParsedPart]` with all-string
   frames. Shared metadata, hashing, re-hash check, atomic write and logging stay as they are.
 - **Workbooks:** one Parquet file per workbook, all sheets combined, with `_sheet_name` on every row.
 - **`--delimiter` flag:** supplies a single-character delimiter for files with no extension default
-  (`.txt`, `.dat`). Config `delimiter:` wins over it; it never overrides `.csv`, `.tsv` or `.psv`. With
-  neither, the file is held (`needs_config`) and the run exits 3.
+  (`.txt`, `.dat`). It wins over config `delimiter:` for those files and never touches `.csv`, `.tsv`
+  or `.psv`. With neither flag nor config, the file is held (`needs_config`) and the run exits 3.
 - **Config:** `config/sources/<source>.yaml` with `delimiter`, `encoding`, `format`, `sheets`. Unknown
   keys raise.
 - **Exit codes:** 0 ok, 1 a file failed, 2 bad source or folder, 3 nothing failed but files are held.
@@ -47,7 +47,7 @@ Full rationale is in `docs/decisions/0002-bronze-multi-format.md`.
 | # | Task | Agent | Model | Acceptance criteria | Depends on |
 |---|------|-------|-------|---------------------|------------|
 | 0 | This plan and ADR 0002. | Alfred | Opus | Michael approves both. | - |
-| 1 | Reader registry, `SourceConfig`, delimited reader (comma, tab, pipe, config delimiter, `--delimiter` flag, encoding), `ingest_file`, `ingest_csv` wrapper. | builder | Sonnet | All existing tests pass unchanged. New tests: `.psv`, `.tsv` and `.txt` with a config delimiter or `--delimiter '|'` load as strings; a multi-character `--delimiter` exits 2; config beats the flag; the flag does not change a `.csv`; a cp1252 file with config keeps `é`; an unknown config key raises. Ruff clean. | 0 |
+| 1 | Reader registry, `SourceConfig`, delimited reader (comma, tab, pipe, config delimiter, `--delimiter` flag, encoding), `ingest_file`, `ingest_csv` wrapper. | builder | Sonnet | All existing tests pass unchanged. New tests: `.psv`, `.tsv` and `.txt` with a config delimiter or `--delimiter '|'` load as strings; a multi-character `--delimiter` exits 2; the flag beats config for a `.txt`; the flag does not change a `.csv`; a cp1252 file with config keeps `é`; an unknown config key raises. Ruff clean. | 0 |
 | 2 | Raw zone, signature detection, derived pending, `bronze_unparsed`, exit code 3, `--pending`. | builder | Sonnet | Raw bytes hash-equal the landing bytes. A `.txt` with no config and an unknown `.bin` stay pending (exit 3). Adding the config and rerunning parses the `.txt` (exit 0). An xlsx saved as `.csv` is detected as xlsx. Logs hold no cell values. | 1 |
 | 3 | Excel reader (`uv add fastexcel`) and `_sheet_name` metadata. | builder | Sonnet | A 2-sheet xlsx gives one Parquet file with both sheet names and `_row_number` restarting per sheet. Empty rows inside data are kept. A blank header becomes `unnamed_<n>`. Older bronze files read back with null `_sheet_name`. The `sheets:` filter works. | 2 |
 | 4 | JSON, NDJSON and Parquet readers. | builder | Sonnet | Nested values arrive as JSON strings. Every source column is `pl.String`. An empty array raises like an empty file. | 2 |
