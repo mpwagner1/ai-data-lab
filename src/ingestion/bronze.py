@@ -11,10 +11,7 @@ starts with the file's hash. See docs/decisions/0001-bronze-parquet-storage.md a
 import argparse
 import json
 import logging
-import os
-import re
 import secrets
-import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -26,8 +23,9 @@ import duckdb
 import polars as pl
 
 from ingestion.csv_reader import DEFAULT_SEPARATOR, read_csv_as_strings
-from ingestion.detect import FileFormat, detect_format
+from ingestion.detect import FileFormat, detect_format, validate_format
 from ingestion.metadata import add_bronze_metadata, hash_file
+from ingestion.raw_zone import SOURCE_PATTERN, landing_files, publish, receive_raw
 from ingestion.source_config import (
     CONFIG_ROOT,
     SourceConfig,
@@ -38,13 +36,10 @@ from ingestion.source_config import (
 logger = logging.getLogger(__name__)
 
 _RUN_TS_FORMAT = "%Y%m%dT%H%M%SZ"
-_SOURCE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 LANDING_ROOT = Path("data/landing")
 LAKE_ROOT = Path("lake")
 # Delimiter implied by the extension. `.txt` and `.dat` have none: they need config or --delimiter.
 _EXTENSION_DELIMITERS = {".csv": DEFAULT_SEPARATOR, ".tsv": "\t", ".psv": "|"}
-_RAW_EXTENSION = re.compile(r"\.[a-z0-9]{1,10}")
-_LOCK_SUFFIXES = (".lock", ".lck")
 EXIT_HELD = 3
 
 REASON_NO_READER = "no_reader"
@@ -88,7 +83,7 @@ class RunSummary:
 
 def _validate_source(source: str) -> None:
     # The source becomes a directory name, so keep it from escaping the lake.
-    if not _SOURCE_PATTERN.fullmatch(source):
+    if not SOURCE_PATTERN.fullmatch(source):
         raise ValueError(f"invalid source name: {source!r}")
 
 
@@ -181,56 +176,8 @@ def _elapsed(started: float) -> float:
     return round(time.monotonic() - started, 3)
 
 
-def _publish(target: Path, write: Callable[[Path], object]) -> None:
-    """Write to a temp file, then link it to `target`; fails if `target` exists.
-
-    A crash leaves only a `.tmp` file, which the skip checks and readers ignore.
-    """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp = target.with_name(f"{target.name}.tmp")
-    try:
-        write(temp)
-        os.link(temp, target)  # no-replace: raises FileExistsError
-    finally:
-        temp.unlink(missing_ok=True)
-
-
 def _publish_new_file(frame: pl.DataFrame, target: Path) -> None:
-    _publish(target, frame.write_parquet)
-
-
-def _raw_extension(path: Path) -> str:
-    extension = path.suffix.lower()
-    return extension if _RAW_EXTENSION.fullmatch(extension) else ""
-
-
-def _already_received(raw_dir: Path, file_hash: str) -> bool:
-    candidates = raw_dir.glob(f"receive_date=*/{file_hash}*")
-    return any(
-        p.name == file_hash or p.name.startswith(f"{file_hash}.")
-        for p in candidates
-        if not p.name.endswith(".tmp")
-    )
-
-
-def receive_raw(path: Path, source: str, lake_root: Path, file_hash: str, run_at: datetime) -> bool:
-    """Copy a landing file unchanged into the raw zone. Returns False if its hash is already there.
-
-    The copy is hashed again so the stored bytes are proven equal to the landing bytes.
-    """
-    _validate_source(source)
-    raw_dir = lake_root / "raw" / source
-    if _already_received(raw_dir, file_hash):
-        return False
-    target = raw_dir / f"receive_date={run_at:%Y-%m-%d}" / f"{file_hash}{_raw_extension(path)}"
-
-    def copy(temp: Path) -> None:
-        shutil.copyfile(path, temp)
-        if hash_file(temp) != file_hash:
-            raise RuntimeError(f"file changed during receive: {path.name}")
-
-    _publish(target, copy)
-    return True
+    publish(target, frame.write_parquet)
 
 
 def _warn_stale_temp_files(source: str, source_dir: Path) -> None:
@@ -324,18 +271,6 @@ def read_bronze(source: str, lake_root: Path) -> duckdb.DuckDBPyRelation:
     )
 
 
-def _is_candidate(path: Path) -> bool:
-    """Real files only: hidden files, Office `~$` owner files and lock files are ignored."""
-    name = path.name
-    if name.startswith((".", "~$")) or name.lower().endswith(_LOCK_SUFFIXES):
-        return False
-    return path.is_file()
-
-
-def _landing_files(folder: Path) -> list[Path]:
-    return sorted(p for p in folder.iterdir() if _is_candidate(p))
-
-
 def _prepare(
     source: str, landing_root: Path, config_root: Path | None
 ) -> tuple[Path, SourceConfig]:
@@ -344,6 +279,8 @@ def _prepare(
     if not folder.is_dir():
         raise FileNotFoundError(f"landing folder not found: {folder}")
     config = load_source_config(source, config_root or CONFIG_ROOT)
+    if config.format is not None:
+        validate_format(config.format)  # a config error: fail before anything is copied
     return folder, config
 
 
@@ -366,7 +303,9 @@ def ingest_landing(
     """
     folder, config = _prepare(source, landing_root, config_root)
     _warn_stale_temp_files(source, _source_dir(lake_root, source))
-    files = _landing_files(folder)
+    files, symlinks = landing_files(folder)
+    if symlinks:
+        _log("bronze_ignored", source=source, symlinks=symlinks)
     if not files:
         logger.warning("event=bronze_no_files source=%s", json.dumps(source))
         return RunSummary(failed=0, pending=0)
@@ -435,7 +374,7 @@ def list_pending(
     folder, config = _prepare(source, landing_root, config_root)
     source_dir = _source_dir(lake_root, source)
     count = 0
-    for path in _landing_files(folder):
+    for path in landing_files(folder)[0]:
         file_hash = hash_file(path)
         if _already_ingested(source_dir, file_hash):
             continue

@@ -258,3 +258,100 @@ def test_logs_contain_no_cell_values(project: Path, caplog: pytest.LogCaptureFix
     assert SECRET not in caplog.text
     assert "event=bronze_receive" in caplog.text
     assert "event=bronze_unparsed" in caplog.text
+
+
+def _outside(project: Path) -> Path:
+    outside = project / "outside.csv"
+    outside.write_text(f"id,v\n9,{SECRET}\n")
+    return outside
+
+
+def test_symlink_is_not_received_parsed_or_counted_in_exit_code(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    landing = _landing(project)
+    (landing / "link.csv").symlink_to(_outside(project))
+    (landing / "real.csv").write_text("id\n1\n")
+    caplog.set_level(logging.INFO)
+
+    assert main(["demo"]) == 0
+
+    assert len(_raw_files(project)) == 1
+    assert len(_bronze_files(project)) == 1
+    assert "event=bronze_ignored" in caplog.text
+    assert "symlinks=1" in caplog.text
+    assert SECRET not in caplog.text
+    assert "link.csv" not in caplog.text
+
+
+def test_only_symlinks_writes_nothing(project: Path) -> None:
+    (_landing(project) / "link.csv").symlink_to(_outside(project))
+    assert main(["demo"]) == 0
+    assert not (project / "lake" / "raw").exists()
+
+
+def test_pending_ignores_symlinks(project: Path, caplog: pytest.LogCaptureFixture) -> None:
+    (_landing(project) / "link.csv").symlink_to(_outside(project))
+    caplog.set_level(logging.INFO)
+    assert main(["demo", "--pending"]) == 0
+    assert "event=bronze_pending " not in caplog.text
+
+
+def test_receive_raw_refuses_symlink(project: Path) -> None:
+    link = _landing(project) / "link.csv"
+    link.symlink_to(_outside(project))
+    with pytest.raises(ValueError, match="symlinks"):
+        receive_raw(link, "demo", project / "lake", "0" * 64, RUN_AT)
+    assert _raw_files(project) == []
+
+
+def _config(project: Path, text: str) -> None:
+    folder = project / "config" / "sources"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "demo.yaml").write_text(text)
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le"])
+def test_utf16_csv_with_config_encoding_parses(project: Path, encoding: str) -> None:
+    (_landing(project) / "a.csv").write_bytes(f"id,code\n001,{SECRET}\n".encode(encoding))
+    _config(project, f"encoding: {encoding}\n")
+    assert main(["demo"]) == 0
+    frame = pl.read_parquet(_bronze_files(project)[0])
+    assert frame.columns[:2] == ["id", "code"]
+    assert frame["id"].to_list() == ["001"]
+    assert frame["code"].to_list() == [SECRET]
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])
+def test_utf16_csv_without_config_is_held_as_encoding(
+    project: Path, caplog: pytest.LogCaptureFixture, encoding: str
+) -> None:
+    (_landing(project) / "a.csv").write_bytes(f"id,code\n1,{SECRET}\n".encode(encoding))
+    caplog.set_level(logging.INFO)
+    assert main(["demo"]) == 3
+    assert 'reason="encoding"' in caplog.text
+    assert 'reason="no_reader"' not in caplog.text
+    assert _bronze_files(project) == []
+    assert len(_raw_files(project)) == 1
+
+
+def test_binary_with_nuls_and_csv_name_still_no_reader(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (_landing(project) / "a.csv").write_bytes(b"\x01\x00\x00\x00\x02\xff\x00\x07\x00\x00")
+    caplog.set_level(logging.INFO)
+    assert main(["demo"]) == 3
+    assert 'reason="no_reader"' in caplog.text
+
+
+@pytest.mark.parametrize("flag", [[], ["--pending"]])
+def test_bad_config_format_exits_2_and_copies_nothing(
+    project: Path, caplog: pytest.LogCaptureFixture, flag: list[str]
+) -> None:
+    (_landing(project) / "a.csv").write_text("id\n1\n")
+    _config(project, "format: SECRETFORMAT\n")
+    caplog.set_level(logging.INFO)
+    assert main(["demo", *flag]) == 2
+    assert not (project / "lake" / "raw").exists()
+    assert "SECRETFORMAT" not in caplog.text
+    assert "ValueError" in caplog.text

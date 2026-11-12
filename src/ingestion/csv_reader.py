@@ -23,8 +23,14 @@ def _check_utf8(path: Path) -> None:
     """
     decoder = codecs.getincrementaldecoder("utf-8")()
     with path.open("rb") as handle:
-        while chunk := handle.read(_CHUNK_BYTES):
+        first = handle.read(_CHUNK_BYTES)
+        # NUL in the start of a "UTF-8" file means UTF-16/32 text; refuse it rather than misread.
+        if b"\x00" in first:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "NUL byte")
+        chunk = first
+        while chunk:
             decoder.decode(chunk)
+            chunk = handle.read(_CHUNK_BYTES)
     decoder.decode(b"", final=True)
 
 

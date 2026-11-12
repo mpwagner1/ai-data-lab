@@ -6,7 +6,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from ingestion import bronze
+from ingestion import bronze, raw_zone
 from ingestion.bronze import IngestResult, ingest_csv, main, read_bronze
 from ingestion.metadata import BRONZE_META_COLUMNS, hash_file
 
@@ -334,7 +334,7 @@ def test_link_collision_removes_temp_file(tmp_path: Path, monkeypatch: pytest.Mo
     def fail_link(src: Path, dst: Path) -> None:
         raise FileExistsError(dst)
 
-    monkeypatch.setattr(bronze.os, "link", fail_link)
+    monkeypatch.setattr(raw_zone.os, "link", fail_link)
 
     with pytest.raises(FileExistsError):
         ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT)
