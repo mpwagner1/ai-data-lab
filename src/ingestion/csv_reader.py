@@ -1,5 +1,6 @@
 """Read CSV files for bronze: every value stays a string, exactly as read."""
 
+import codecs
 import io
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import polars as pl
 
 DEFAULT_SEPARATOR = ","
 DEFAULT_ENCODING = "utf-8"
+_CHUNK_BYTES = 1024 * 1024
 
 
 def _has_no_content(path: Path) -> bool:
@@ -14,8 +16,27 @@ def _has_no_content(path: Path) -> bool:
     return not path.read_bytes().strip()
 
 
+def _check_utf8(path: Path) -> None:
+    """Stream the file through a strict UTF-8 decoder; raises UnicodeDecodeError if invalid.
+
+    Polars would fail later with a generic error, so this gives bronze a clear `encoding` signal.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    with path.open("rb") as handle:
+        first = handle.read(_CHUNK_BYTES)
+        # NUL in the start of a "UTF-8" file means UTF-16/32 text; refuse it rather than misread.
+        if b"\x00" in first:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "NUL byte")
+        chunk = first
+        while chunk:
+            decoder.decode(chunk)
+            chunk = handle.read(_CHUNK_BYTES)
+    decoder.decode(b"", final=True)
+
+
 def _scan(path: Path, separator: str, encoding: str) -> pl.LazyFrame:
     if encoding.lower().replace("_", "-") in {"utf-8", "utf8"}:
+        _check_utf8(path)
         return pl.scan_csv(path, separator=separator, infer_schema=False)
     # Polars only reads UTF-8, so decode other encodings first (in memory, not lazy).
     text = path.read_bytes().decode(encoding)

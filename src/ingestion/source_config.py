@@ -3,7 +3,6 @@
 Every key is optional. Unknown keys raise so a typo cannot be silently ignored.
 """
 
-import codecs
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,15 +44,20 @@ def validate_delimiter(delimiter: object) -> None:
 
 
 def validate_encoding(encoding: object) -> None:
-    """Raise ValueError unless `encoding` names a text codec (so not `hex`, `base64`, ...)."""
+    """Raise ValueError unless `encoding` is a text codec (so not `hex`, `base64`, `undefined`...).
+
+    Trial round trip of a short ASCII string. Fails closed: anything that does not give the
+    same string back is rejected. Messages never echo the value.
+    """
     if not isinstance(encoding, str):
         raise ValueError("encoding must be a string")
+    sample = "abc"
     try:
-        info = codecs.lookup(encoding)
-    except LookupError as error:
-        raise ValueError("unknown encoding") from error
-    if not getattr(info, "_is_text_encoding", True):
-        raise ValueError("encoding is not a text encoding")
+        ok = sample.encode(encoding).decode(encoding) == sample
+    except (LookupError, UnicodeError, TypeError, ValueError, AttributeError):
+        raise ValueError("encoding is not a usable text encoding") from None
+    if not ok:
+        raise ValueError("encoding is not a usable text encoding")
 
 
 def _parse_sheets(sheets: object) -> tuple[str, ...] | None:
@@ -70,9 +74,9 @@ def parse_source_config(raw: object) -> SourceConfig:
         return SourceConfig()
     if not isinstance(raw, dict):
         raise ValueError("source config must be a mapping")
-    unknown = sorted(str(key) for key in set(raw) - _KNOWN_KEYS)
-    if unknown:
-        raise ValueError(f"unknown source config keys: {unknown}")
+    if set(raw) - _KNOWN_KEYS:
+        # Count only: config text (even key names) never goes into an error message.
+        raise ValueError("unknown source config keys")
     sheets = _parse_sheets(raw.get("sheets"))
     values = {key: value for key, value in raw.items() if key != "sheets" and value is not None}
     return SourceConfig(sheets=sheets, **values)

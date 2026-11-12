@@ -1,47 +1,63 @@
-"""Bronze write path: one append-only Parquet file per load of a source CSV.
+"""Bronze write path: every landing file is kept in the raw zone, then parsed if we can.
 
-Layout: `<lake_root>/bronze/<source>/ingest_date=YYYY-MM-DD/<file_hash><run_ts>_<suffix>.parquet`.
+Raw zone: `<lake_root>/raw/<source>/receive_date=YYYY-MM-DD/<file_hash><ext>`, the exact bytes.
+Bronze: `<lake_root>/bronze/<source>/ingest_date=YYYY-MM-DD/<file_hash><run_ts>_<suffix>.parquet`.
 `<suffix>` is 8 random hex chars so two loads in the same second never collide.
-See docs/decisions/0001-bronze-parquet-storage.md.
+A file with no reader, missing config or an unusable encoding is held (pending): it stays in the
+raw zone, `bronze_unparsed` is logged and the run exits 3. Pending is derived: no bronze file
+starts with the file's hash. See docs/decisions/0001-bronze-parquet-storage.md and 0002.
 """
 
 import argparse
 import json
 import logging
-import os
-import re
 import secrets
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum
 from pathlib import Path
 
 import duckdb
 import polars as pl
 
 from ingestion.csv_reader import DEFAULT_SEPARATOR, read_csv_as_strings
+from ingestion.detect import FileFormat, detect_format, validate_format
 from ingestion.metadata import add_bronze_metadata, hash_file
-from ingestion.source_config import SourceConfig, load_source_config, validate_delimiter
+from ingestion.raw_zone import SOURCE_PATTERN, landing_files, publish, receive_raw
+from ingestion.source_config import (
+    CONFIG_ROOT,
+    SourceConfig,
+    load_source_config,
+    validate_delimiter,
+)
 
 logger = logging.getLogger(__name__)
 
 _RUN_TS_FORMAT = "%Y%m%dT%H%M%SZ"
-_SOURCE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 LANDING_ROOT = Path("data/landing")
 LAKE_ROOT = Path("lake")
 # Delimiter implied by the extension. `.txt` and `.dat` have none: they need config or --delimiter.
 _EXTENSION_DELIMITERS = {".csv": DEFAULT_SEPARATOR, ".tsv": "\t", ".psv": "|"}
-_NO_DEFAULT_EXTENSIONS = (".txt", ".dat")
-_LANDING_EXTENSIONS = (*_EXTENSION_DELIMITERS, *_NO_DEFAULT_EXTENSIONS)
+EXIT_HELD = 3
+
+REASON_NO_READER = "no_reader"
+REASON_NEEDS_CONFIG = "needs_config"
+REASON_ENCODING = "encoding"
+REASON_READY = "ready"
 
 
-class FileFormat(Enum):
-    """File formats bronze can read. Later tasks add Excel, JSON and Parquet."""
+class MissingDelimiterError(ValueError):
+    """A delimited file has no delimiter from the flag, config or extension."""
 
-    DELIMITED = "delimited"
+
+class FileHeld(ValueError):
+    """The file is kept but cannot be parsed yet. `reason` is one of the REASON_* values."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 Reader = Callable[[Path, SourceConfig, str | None], pl.LazyFrame]
@@ -57,9 +73,17 @@ class IngestResult:
     skipped: bool
 
 
+@dataclass(frozen=True)
+class RunSummary:
+    """Outcome of one `ingest_landing` run."""
+
+    failed: int
+    pending: int
+
+
 def _validate_source(source: str) -> None:
     # The source becomes a directory name, so keep it from escaping the lake.
-    if not _SOURCE_PATTERN.fullmatch(source):
+    if not SOURCE_PATTERN.fullmatch(source):
         raise ValueError(f"invalid source name: {source!r}")
 
 
@@ -86,7 +110,9 @@ def resolve_delimiter(path: Path, config: SourceConfig, flag: str | None) -> str
         return config.delimiter
     default = _EXTENSION_DELIMITERS.get(extension)
     if default is None:
-        raise ValueError(f"no delimiter for {path.name}: set `delimiter` in config or --delimiter")
+        raise MissingDelimiterError(
+            f"no delimiter for {path.name}: set `delimiter` in config or --delimiter"
+        )
     return default
 
 
@@ -98,17 +124,37 @@ def _read_delimited(path: Path, config: SourceConfig, flag: str | None) -> pl.La
 READERS: dict[FileFormat, Reader] = {FileFormat.DELIMITED: _read_delimited}
 
 
+def _check_readable(
+    path: Path, file_format: FileFormat | None, config: SourceConfig, flag: str | None
+) -> FileFormat:
+    """Return the format to parse with, or raise FileHeld saying why the file must wait."""
+    if file_format is None or file_format not in READERS:
+        raise FileHeld(REASON_NO_READER, f"no reader for {path.name}")
+    if file_format is FileFormat.DELIMITED:
+        try:
+            resolve_delimiter(path, config, flag)
+        except MissingDelimiterError as error:
+            raise FileHeld(REASON_NEEDS_CONFIG, str(error)) from None
+    return file_format
+
+
 def _load_with_metadata(
-    path: Path, file_hash: str, run_at: datetime, config: SourceConfig, flag: str | None
+    path: Path,
+    file_hash: str,
+    run_at: datetime,
+    config: SourceConfig,
+    flag: str | None,
+    file_format: FileFormat,
 ) -> pl.DataFrame:
     """Collect right after hashing, then re-hash to prove the file did not change.
 
     Otherwise a file edited mid-read could leave `_file_hash` not matching the rows.
     """
-    lazy = add_bronze_metadata(
-        READERS[FileFormat.DELIMITED](path, config, flag), path.name, file_hash, run_at
-    )
-    frame = lazy.collect()
+    try:
+        source_rows = READERS[file_format](path, config, flag)
+        frame = add_bronze_metadata(source_rows, path.name, file_hash, run_at).collect()
+    except UnicodeError:
+        raise FileHeld(REASON_ENCODING, f"cannot decode {path.name}") from None
     if hash_file(path) != file_hash:
         raise RuntimeError(f"file changed during ingestion: {path.name}")
     return frame
@@ -131,17 +177,7 @@ def _elapsed(started: float) -> float:
 
 
 def _publish_new_file(frame: pl.DataFrame, target: Path) -> None:
-    """Write to a temp file, then link it to `target`; fails if `target` exists.
-
-    A crash leaves only a `.tmp` file, which the skip check and readers ignore.
-    """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp = target.with_name(f"{target.name}.tmp")
-    try:
-        frame.write_parquet(temp)
-        os.link(temp, target)  # no-replace: raises FileExistsError
-    finally:
-        temp.unlink(missing_ok=True)
+    publish(target, frame.write_parquet)
 
 
 def _warn_stale_temp_files(source: str, source_dir: Path) -> None:
@@ -176,6 +212,8 @@ def ingest_file(
     run_at: datetime | None = None,
     config: SourceConfig | None = None,
     delimiter: str | None = None,
+    file_hash: str | None = None,
+    file_format: FileFormat | None = None,
 ) -> IngestResult:
     """Load one file into bronze; skip it if its hash was already loaded unless `force`.
 
@@ -184,6 +222,10 @@ def ingest_file(
     `config` holds per-source settings (defaults if None). `delimiter` is the --delimiter flag
     value; it only applies to files with no extension default (`.txt`, `.dat`).
 
+    The format comes from `file_format`, else detection (config, signature, text). A file that
+    cannot be parsed yet raises `FileHeld` (a ValueError) with a `reason`. `file_hash` saves a
+    second hashing pass when the caller already has it.
+
     `run_at` (UTC) is injectable for tests; it defaults to now. Existing files are never
     overwritten: a name collision raises FileExistsError.
     """
@@ -191,7 +233,8 @@ def ingest_file(
     started = time.monotonic()
     run_at = (run_at or datetime.now(UTC)).replace(microsecond=0)
     source_dir = _source_dir(lake_root, source)
-    file_hash = hash_file(path)
+    config = config or SourceConfig()
+    file_hash = file_hash or hash_file(path)
     if not force and _already_ingested(source_dir, file_hash):
         _log(
             "bronze_skip",
@@ -201,7 +244,10 @@ def ingest_file(
             duration_s=_elapsed(started),
         )
         return IngestResult(path.name, file_hash, 0, skipped=True)
-    frame = _load_with_metadata(path, file_hash, run_at, config or SourceConfig(), delimiter)
+    file_format = _check_readable(
+        path, file_format or detect_format(path, config), config, delimiter
+    )
+    frame = _load_with_metadata(path, file_hash, run_at, config, delimiter, file_format)
     target = _target_path(source_dir, file_hash, run_at)
     _publish_new_file(frame, target)
     _log(
@@ -225,6 +271,19 @@ def read_bronze(source: str, lake_root: Path) -> duckdb.DuckDBPyRelation:
     )
 
 
+def _prepare(
+    source: str, landing_root: Path, config_root: Path | None
+) -> tuple[Path, SourceConfig]:
+    _validate_source(source)
+    folder = landing_root / source
+    if not folder.is_dir():
+        raise FileNotFoundError(f"landing folder not found: {folder}")
+    config = load_source_config(source, config_root or CONFIG_ROOT)
+    if config.format is not None:
+        validate_format(config.format)  # a config error: fail before anything is copied
+    return folder, config
+
+
 def ingest_landing(
     source: str,
     landing_root: Path,
@@ -232,36 +291,57 @@ def ingest_landing(
     force: bool,
     delimiter: str | None = None,
     config_root: Path | None = None,
-) -> int:
-    """Ingest every delimited file (.csv .tsv .psv .txt .dat) in `<landing_root>/<source>/`.
+) -> RunSummary:
+    """Receive and ingest every file in `<landing_root>/<source>/` (hidden and lock files aside).
 
-    Returns how many files failed.
+    Each file is copied to the raw zone, then parsed. Files that cannot be parsed yet are
+    counted as pending (`bronze_unparsed` is logged with a reason). Returns the counts.
 
     One bad file does not stop the rest. Failures are logged with the error type and
     file name only (messages can carry values, so they are not logged).
     Raises FileNotFoundError if the landing folder is missing.
     """
-    _validate_source(source)
-    folder = landing_root / source
-    if not folder.is_dir():
-        raise FileNotFoundError(f"landing folder not found: {folder}")
+    folder, config = _prepare(source, landing_root, config_root)
     _warn_stale_temp_files(source, _source_dir(lake_root, source))
-    config = (
-        load_source_config(source)
-        if config_root is None
-        else load_source_config(source, config_root)
-    )
-    files = sorted(p for p in folder.iterdir() if p.suffix.lower() in _LANDING_EXTENSIONS)
+    files, symlinks = landing_files(folder)
+    if symlinks:
+        _log("bronze_ignored", source=source, symlinks=symlinks)
     if not files:
         logger.warning("event=bronze_no_files source=%s", json.dumps(source))
-        return 0
-    failed = 0
-    written = skipped = 0
+        return RunSummary(failed=0, pending=0)
+    run_at = datetime.now(UTC).replace(microsecond=0)
+    failed = pending = written = skipped = 0
     for path in files:
         try:
-            result = ingest_file(
-                path, source, lake_root, force=force, config=config, delimiter=delimiter
+            file_hash = hash_file(path)
+            is_new = receive_raw(path, source, lake_root, file_hash, run_at)
+            _log(
+                "bronze_receive",
+                source=source,
+                file_name=path.name,
+                file_hash=file_hash,
+                new=int(is_new),
             )
+            result = ingest_file(
+                path,
+                source,
+                lake_root,
+                force=force,
+                run_at=run_at,
+                config=config,
+                delimiter=delimiter,
+                file_hash=file_hash,
+            )
+        except FileHeld as held:
+            pending += 1
+            _log(
+                "bronze_unparsed",
+                source=source,
+                file_name=path.name,
+                file_hash=file_hash,
+                reason=held.reason,
+            )
+            continue
         except Exception as error:  # noqa: BLE001 - keep going; reported via exit code
             failed += 1
             _log("bronze_error", source=source, file_name=path.name, error=type(error).__name__)
@@ -274,15 +354,54 @@ def ingest_landing(
         files=len(files),
         written=written,
         skipped=skipped,
+        pending=pending,
         failed=failed,
     )
-    return failed
+    return RunSummary(failed=failed, pending=pending)
+
+
+def list_pending(
+    source: str,
+    landing_root: Path,
+    lake_root: Path,
+    delimiter: str | None = None,
+    config_root: Path | None = None,
+) -> int:
+    """Log one `bronze_pending` line per landing file with no bronze rows yet. Writes nothing.
+
+    `reason` says why it is held, or `ready` if the next run can parse it. Returns the count.
+    """
+    folder, config = _prepare(source, landing_root, config_root)
+    source_dir = _source_dir(lake_root, source)
+    count = 0
+    for path in landing_files(folder)[0]:
+        file_hash = hash_file(path)
+        if _already_ingested(source_dir, file_hash):
+            continue
+        count += 1
+        try:
+            _check_readable(path, detect_format(path, config), config, delimiter)
+            reason = REASON_READY
+        except FileHeld as held:
+            reason = held.reason
+        _log(
+            "bronze_pending", source=source, file_name=path.name, file_hash=file_hash, reason=reason
+        )
+    _log("bronze_pending_run", source=source, pending=count)
+    return count
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ingestion.bronze", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="ingestion.bronze",
+        description=__doc__,
+        epilog="exit codes: 0 ok, 1 a file failed, 2 bad source or folder, 3 files held (pending)",
+    )
+    parser.add_argument("source", help="source name; reads files in data/landing/<source>/")
     parser.add_argument(
-        "source", help="source name; reads delimited files in data/landing/<source>/"
+        "--pending",
+        action="store_true",
+        help="list files with no bronze rows yet and why (writes nothing); exit 3 if any",
     )
     parser.add_argument("--force", action="store_true", help="reload files already ingested")
     parser.add_argument(
@@ -307,7 +426,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        failed = ingest_landing(
+        if args.pending:
+            count = list_pending(args.source, LANDING_ROOT, LAKE_ROOT, delimiter=args.delimiter)
+            return EXIT_HELD if count else 0
+        summary = ingest_landing(
             args.source, LANDING_ROOT, LAKE_ROOT, force=args.force, delimiter=args.delimiter
         )
     except FileNotFoundError as error:
@@ -319,7 +441,9 @@ def main(argv: list[str] | None = None) -> int:
             "event=bronze_error error=%s source=%s", type(error).__name__, json.dumps(args.source)
         )
         return 2
-    return 1 if failed else 0
+    if summary.failed:
+        return 1
+    return EXIT_HELD if summary.pending else 0
 
 
 if __name__ == "__main__":
