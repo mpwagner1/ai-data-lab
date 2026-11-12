@@ -42,3 +42,5 @@
 | 2026-11-12 | #51 | builder | Sonnet | Dispatched: split bronze.py (479 lines) into bronze.py, bronze_cli.py and metadata helper, no behavior change, all files under 450 lines. Result pending. |
 | 2026-11-12 | #51 | builder | Sonnet | PR #53 opened: bronze.py split (479 to 393 lines) into bronze.py, bronze_cli.py and metadata.with_metadata; no test changes; 12-run before/after CLI comparison identical (pytest 255 passed). `_log`/`_quote` stay in bronze.py (circular otherwise). |
 | 2026-11-12 | #51 | code-reviewer | Sonnet | PR #53 reviewed: merge. Pure move confirmed; 13 before/after CLI runs identical. Minor: no `__main__` guard in bronze_cli, six private bronze names reached from bronze_cli, bronze_error lines now come from the bronze_cli logger. |
+| 2026-11-12 | #51 | - | - | PRs #52 and #53 merged by Michael. |
+| 2026-11-12 | #31 | builder | Sonnet | Dispatched: multi-format task 4 (JSON, NDJSON and Parquet readers: scalars keep source text, nested values JSON-encoded, all columns strings). Result pending. |
