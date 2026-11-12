@@ -156,6 +156,7 @@ def _load_with_metadata(
     config: SourceConfig,
     flag: str | None,
     file_format: FileFormat,
+    file_name: str,
 ) -> pl.DataFrame:
     """Collect right after hashing, then re-hash to prove the file did not change.
 
@@ -163,7 +164,7 @@ def _load_with_metadata(
     """
     try:
         parts = READERS[file_format](path, config, flag)
-        frame = with_metadata(parts, path.name, file_hash, run_at)
+        frame = with_metadata(parts, file_name, file_hash, run_at)
     except UnicodeError:
         raise FileHeld(REASON_ENCODING, f"cannot decode {path.name}") from None
     if hash_file(path) != file_hash:
@@ -225,6 +226,8 @@ def ingest_file(
     delimiter: str | None = None,
     file_hash: str | None = None,
     file_format: FileFormat | None = None,
+    file_name: str | None = None,
+    log_name: str | None = None,
 ) -> IngestResult:
     """Load one file into bronze; skip it if its hash was already loaded unless `force`.
 
@@ -237,11 +240,17 @@ def ingest_file(
     cannot be parsed yet raises `FileHeld` (a ValueError) with a `reason`. `file_hash` saves a
     second hashing pass when the caller already has it.
 
+    `file_name` is the stored `_file_name` (default: the file's name). Archive members pass
+    `<archive>!<member>` here and a member-free `log_name` (default: the file's name) for logs,
+    because member names are untrusted and never logged.
+
     `run_at` (UTC) is injectable for tests; it defaults to now. Existing files are never
     overwritten: a name collision raises FileExistsError.
     """
     _validate_source(source)
     started = time.monotonic()
+    log_name = log_name or path.name
+    file_name = file_name or path.name
     run_at = (run_at or datetime.now(UTC)).replace(microsecond=0)
     source_dir = _source_dir(lake_root, source)
     config = config or SourceConfig()
@@ -250,26 +259,26 @@ def ingest_file(
         _log(
             "bronze_skip",
             source=source,
-            file_name=path.name,
+            file_name=log_name,
             file_hash=file_hash,
             duration_s=_elapsed(started),
         )
-        return IngestResult(path.name, file_hash, 0, skipped=True)
+        return IngestResult(log_name, file_hash, 0, skipped=True)
     file_format = _check_readable(
         path, file_format or detect_format(path, config), config, delimiter
     )
-    frame = _load_with_metadata(path, file_hash, run_at, config, delimiter, file_format)
+    frame = _load_with_metadata(path, file_hash, run_at, config, delimiter, file_format, file_name)
     target = _target_path(source_dir, file_hash, run_at)
     _publish_new_file(frame, target)
     _log(
         "bronze_write",
         source=source,
-        file_name=path.name,
+        file_name=log_name,
         file_hash=file_hash,
         rows_ingested=frame.height,
         duration_s=_elapsed(started),
     )
-    return IngestResult(path.name, file_hash, frame.height, skipped=False)
+    return IngestResult(log_name, file_hash, frame.height, skipped=False)
 
 
 def read_bronze(source: str, lake_root: Path) -> duckdb.DuckDBPyRelation:
@@ -312,6 +321,8 @@ def ingest_landing(
     file name only (messages can carry values, so they are not logged).
     Raises FileNotFoundError if the landing folder is missing.
     """
+    from ingestion.archive_ingest import ARCHIVE_FORMATS, ingest_archive  # avoids a cycle
+
     folder, config = _prepare(source, landing_root, config_root)
     _warn_stale_temp_files(source, _source_dir(lake_root, source))
     files, symlinks = landing_files(folder)
@@ -333,6 +344,16 @@ def ingest_landing(
                 file_hash=file_hash,
                 new=int(is_new),
             )
+            file_format = detect_format(path, config)
+            if file_format in ARCHIVE_FORMATS:
+                outcome = ingest_archive(
+                    path, file_format, source, lake_root, force, run_at, config, delimiter
+                )
+                failed += outcome.failed
+                pending += outcome.pending
+                written += outcome.written
+                skipped += outcome.skipped
+                continue
             result = ingest_file(
                 path,
                 source,
@@ -342,6 +363,7 @@ def ingest_landing(
                 config=config,
                 delimiter=delimiter,
                 file_hash=file_hash,
+                file_format=file_format,
             )
         except FileHeld as held:
             pending += 1

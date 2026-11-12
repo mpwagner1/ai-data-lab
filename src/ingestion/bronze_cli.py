@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 
 from ingestion import bronze
+from ingestion.archive_ingest import ARCHIVE_FORMATS, list_pending_members
 from ingestion.detect import detect_format
 from ingestion.metadata import hash_file
 from ingestion.raw_zone import landing_files
@@ -33,12 +34,16 @@ def list_pending(
     source_dir = bronze._source_dir(lake_root, source)
     count = 0
     for path in landing_files(folder)[0]:
+        file_format = detect_format(path, config)
+        if file_format in ARCHIVE_FORMATS:
+            count += list_pending_members(path, file_format, source, source_dir, config, delimiter)
+            continue
         file_hash = hash_file(path)
         if bronze._already_ingested(source_dir, file_hash):
             continue
         count += 1
         try:
-            bronze._check_readable(path, detect_format(path, config), config, delimiter)
+            bronze._check_readable(path, file_format, config, delimiter)
             reason = bronze.REASON_READY
         except bronze.FileHeld as held:
             reason = held.reason
