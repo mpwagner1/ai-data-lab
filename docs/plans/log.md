@@ -23,3 +23,5 @@
 | 2026-11-12 | #38 | builder | Sonnet | PR #40 opened: config errors exit 2 without config text, single-byte delimiter and text-codec validation, reader call cleanup (pytest 92 passed). |
 | 2026-11-12 | #38 | code-reviewer | Sonnet | PR #40 reviewed: no blockers; 3 minor items (private _is_text_encoding fails open, unknown-key error message names config keys, small test gaps). |
 | 2026-11-12 | #29 | builder | Sonnet | Dispatched: multi-format task 2 (raw zone, detection, pending, exit code 3), plus config.format dispatch and two #40 review fixes (validate_encoding by trial encode/decode, no config key names in the unknown-key error). Result pending. |
+| 2026-11-12 | #29 | builder | Sonnet | PR #42 opened: raw zone, signature detection, derived pending, exit code 3, --pending, config.format dispatch, validate_encoding fix (pytest 130 passed). |
+| 2026-11-12 | #29 | code-reviewer | Sonnet | PR #42 reviewed: 4 findings (bronze.py 511 lines over the 500 limit; symlinks in landing escape the folder; UTF-16 .csv held as no_reader even with config; bad config format exits 1 normally but 2 under --pending, raw copy happens before validation). Fixes pending. |
