@@ -10,6 +10,7 @@ import zipfile
 from enum import Enum
 from pathlib import Path
 
+from ingestion.csv_reader import looks_utf16
 from ingestion.source_config import SourceConfig
 
 _HEAD_BYTES = 64 * 1024
@@ -80,16 +81,6 @@ def _json_kind(head: bytes) -> FileFormat | None:
     return FileFormat.NDJSON
 
 
-def _looks_utf16(head: bytes) -> bool:
-    """UTF-16/32 text: a BOM, or NUL in every second byte of the start (ASCII-range text)."""
-    if head.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return True
-    start = head[:64]
-    return len(start) >= 4 and (
-        start[1::2].count(0) == len(start[1::2]) or start[::2].count(0) == len(start[::2])
-    )
-
-
 def _decode_head(head: bytes, encoding: str) -> bytes | None:
     """Decode the start of the file with the configured encoding, as UTF-8 bytes.
 
@@ -103,11 +94,23 @@ def _decode_head(head: bytes, encoding: str) -> bytes | None:
         return None
 
 
+def _is_valid_utf8(head: bytes) -> bool:
+    """True if the bytes are strict UTF-8 (a cut-off last character is fine)."""
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(head)
+    except UnicodeError:
+        return False
+    return True
+
+
 def _from_text(extension: str, head: bytes) -> FileFormat | None:
     if b"\x00" in head:
         # Delimited text in UTF-16/32 is still delimited: the reader then holds it as `encoding`
-        # unless config names the right one. Other NUL-bearing files are binary.
-        if extension in _DELIMITED_EXTENSIONS and _looks_utf16(head):
+        # unless config names the right one. A stray NUL in valid UTF-8 is data, so it is read
+        # too. Anything else with NULs is binary.
+        if extension not in _DELIMITED_EXTENSIONS:
+            return None
+        if looks_utf16(head) or _is_valid_utf8(head):
             return FileFormat.DELIMITED
         return None
     if extension not in _EXTENSIONS_WITH_DELIMITER:
