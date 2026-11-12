@@ -1,7 +1,9 @@
 # 0002: Bronze accepts any file, parses by format, and keeps the raw bytes
 
 Date: 2026-11-12
-Status: Accepted (approved by Michael 2026-11-12, with the `_sheet_name` column and `--delimiter` flag)
+Status: Accepted (approved by Michael 2026-11-12, with the `_sheet_name` column and `--delimiter` flag).
+Amended 2026-11-12: `header_row` config key and sheet-row `_row_number` for workbooks (below); detection wording
+matched to the code.
 
 ## Context
 
@@ -26,7 +28,7 @@ every source column a string, no casting or cleaning, no row data in logs.
   Metadata, hashing, the re-hash check, the atomic write and logging are shared.
 - **Detection.** Order: `format:` in config, then file signature (`PK` zip container → xlsx or ods or
   archive, `D0CF11E0` xls, `PAR1` Parquet, `1F8B` gzip), then text heuristics (JSON array, NDJSON,
-  else delimited). A delimited file's delimiter comes from the `--delimiter` flag (only for files with
+  or delimited when the extension is `.csv`, `.tsv`, `.psv` or the config says so). A delimited file's delimiter comes from the `--delimiter` flag (only for files with
   no extension default), then config, then extension (`.csv` comma, `.tsv` tab, `.psv` pipe). There is
   **no delimiter sniffing**: an unknown `.txt` or `.dat` with none of those is held with
   `reason=needs_config`.
@@ -37,13 +39,28 @@ every source column a string, no casting or cleaning, no row data in logs.
   config, such a file is still held with
   `reason=needs_config` and the run exits 3. The flag is not stored, so a later run without it holds the
   file again only if it is still pending.
-- **Per-source config.** Optional `config/sources/<source>.yaml` with `delimiter`, `encoding`, `format`
-  and `sheets`. Unknown keys raise.
+- **Per-source config.** Optional `config/sources/<source>.yaml` with `delimiter`, `encoding`, `format`,
+  `sheets` and `header_row`. Unknown keys raise.
 - **Workbooks.** One Parquet file per workbook with all sheets combined (diagonal concat) and a new
-  `_sheet_name` metadata column (null for non-workbooks). `_row_number` restarts at 1 in each sheet.
+  `_sheet_name` metadata column (null for non-workbooks). `_row_number` is the row's position in the sheet as Excel shows it (see Header row).
   Excel is read with `drop_empty_rows=False` and `drop_empty_cols=False` so no rows are silently
   dropped. A blank header cell becomes `unnamed_<n>`, the one documented rename, because the source
   supplied no name and `_`-prefixed names are reserved.
+- **Header row (workbooks).** Real sheets often start with blank or title rows above the headers.
+  `header_row: <n>` in the source config (1-based, default 1, applies to every sheet read) names the
+  sheet row that holds the column headers; the rows above it are not read into bronze. The skipped
+  rows stay in the raw zone, so this is a parsing instruction, not a deletion, and a wrong value is
+  fixed by changing the config and reprocessing. A bronze run logs `header_row` and the count of
+  skipped rows per sheet, never their content. A `header_row` beyond the end of a sheet raises a
+  clear error for that file (it is not held) and exits 1. There is no auto-detection of the header
+  row: a title or note above the headers can carry information, and a guess would be silent. Applying
+  `header_row` to delimited files (preamble lines) is not part of this change.
+- **`_row_number` for workbooks.** For a workbook row it is the row number as shown in the sheet, so
+  a person can open the original file and find the row. With `header_row: 1` the first data row is
+  2; with `header_row: 6` it is 7. It still counts per sheet (each sheet has its own numbering) and
+  empty rows inside the data keep their numbers. This differs from delimited files, where
+  `_row_number` is the 1-based position among data rows (the header is not counted). Both are
+  documented in `contracts/bronze/_metadata.yaml`; bronze files already written are not changed.
 - **Archives.** `.gz` and `.zip` are expanded; each member is its own unit with its own hash and
   `_file_name = "<archive>!<member>"`. Caps on total uncompressed size and member count, member names
   never used as paths, nested archives not expanded.
