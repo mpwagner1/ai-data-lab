@@ -1,10 +1,12 @@
-"""Bronze metadata columns and file hashing."""
+"""Bronze metadata columns, file hashing and the step that attaches metadata to parsed parts."""
 
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
+
+from ingestion.parsed import ParsedPart
 
 BRONZE_META_COLUMNS: tuple[str, ...] = (
     "_file_name",
@@ -52,3 +54,24 @@ def add_bronze_metadata(
         ),
         pl.lit(sheet_name, dtype=pl.String).alias("_sheet_name"),
     )
+
+
+def with_metadata(
+    parts: list[ParsedPart], file_name: str, file_hash: str, run_at: datetime
+) -> pl.DataFrame:
+    """Add metadata to each part (own row numbering and sheet name), then stack them."""
+    frames = [
+        add_bronze_metadata(
+            part.frame,
+            file_name,
+            file_hash,
+            run_at,
+            first_row_number=part.first_row_number,
+            sheet_name=part.sheet_name,
+        ).collect()
+        for part in parts
+    ]
+    frame = frames[0] if len(frames) == 1 else pl.concat(frames, how="diagonal")
+    # Source columns first, metadata last, whatever order the sheets brought columns in.
+    source = [name for name in frame.columns if name not in BRONZE_META_COLUMNS]
+    return frame.select([*source, *BRONZE_META_COLUMNS])

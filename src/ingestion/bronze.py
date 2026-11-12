@@ -8,7 +8,6 @@ raw zone, `bronze_unparsed` is logged and the run exits 3. Pending is derived: n
 starts with the file's hash. See docs/decisions/0001-bronze-parquet-storage.md and 0002.
 """
 
-import argparse
 import json
 import logging
 import secrets
@@ -25,14 +24,13 @@ import polars as pl
 from ingestion.csv_reader import DEFAULT_SEPARATOR, read_csv_as_strings
 from ingestion.detect import FileFormat, detect_format, validate_format
 from ingestion.excel_reader import read_workbook
-from ingestion.metadata import BRONZE_META_COLUMNS, add_bronze_metadata, hash_file
+from ingestion.metadata import hash_file, with_metadata
 from ingestion.parsed import ParsedPart
 from ingestion.raw_zone import SOURCE_PATTERN, landing_files, publish, receive_raw
 from ingestion.source_config import (
     CONFIG_ROOT,
     SourceConfig,
     load_source_config,
-    validate_delimiter,
 )
 
 logger = logging.getLogger(__name__)
@@ -146,27 +144,6 @@ def _check_readable(
     return file_format
 
 
-def _with_metadata(
-    parts: list[ParsedPart], file_name: str, file_hash: str, run_at: datetime
-) -> pl.DataFrame:
-    """Add metadata to each part (own row numbering and sheet name), then stack them."""
-    frames = [
-        add_bronze_metadata(
-            part.frame,
-            file_name,
-            file_hash,
-            run_at,
-            first_row_number=part.first_row_number,
-            sheet_name=part.sheet_name,
-        ).collect()
-        for part in parts
-    ]
-    frame = frames[0] if len(frames) == 1 else pl.concat(frames, how="diagonal")
-    # Source columns first, metadata last, whatever order the sheets brought columns in.
-    source = [name for name in frame.columns if name not in BRONZE_META_COLUMNS]
-    return frame.select([*source, *BRONZE_META_COLUMNS])
-
-
 def _load_with_metadata(
     path: Path,
     file_hash: str,
@@ -181,7 +158,7 @@ def _load_with_metadata(
     """
     try:
         parts = READERS[file_format](path, config, flag)
-        frame = _with_metadata(parts, path.name, file_hash, run_at)
+        frame = with_metadata(parts, path.name, file_hash, run_at)
     except UnicodeError:
         raise FileHeld(REASON_ENCODING, f"cannot decode {path.name}") from None
     if hash_file(path) != file_hash:
@@ -398,81 +375,18 @@ def list_pending(
 ) -> int:
     """Log one `bronze_pending` line per landing file with no bronze rows yet. Writes nothing.
 
-    `reason` says why it is held, or `ready` if the next run can parse it. Returns the count.
+    Lives in `bronze_cli`; imported here on first call to avoid a circular import.
     """
-    folder, config = _prepare(source, landing_root, config_root)
-    source_dir = _source_dir(lake_root, source)
-    count = 0
-    for path in landing_files(folder)[0]:
-        file_hash = hash_file(path)
-        if _already_ingested(source_dir, file_hash):
-            continue
-        count += 1
-        try:
-            _check_readable(path, detect_format(path, config), config, delimiter)
-            reason = REASON_READY
-        except FileHeld as held:
-            reason = held.reason
-        _log(
-            "bronze_pending", source=source, file_name=path.name, file_hash=file_hash, reason=reason
-        )
-    _log("bronze_pending_run", source=source, pending=count)
-    return count
+    from ingestion.bronze_cli import list_pending as _list_pending
+
+    return _list_pending(source, landing_root, lake_root, delimiter, config_root)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="ingestion.bronze",
-        description=__doc__,
-        epilog="exit codes: 0 ok, 1 a file failed, 2 bad source or folder, 3 files held (pending)",
-    )
-    parser.add_argument("source", help="source name; reads files in data/landing/<source>/")
-    parser.add_argument(
-        "--pending",
-        action="store_true",
-        help="list files with no bronze rows yet and why (writes nothing); exit 3 if any",
-    )
-    parser.add_argument("--force", action="store_true", help="reload files already ingested")
-    parser.add_argument(
-        "--delimiter",
-        help="single character for .txt/.dat files; beats config, never changes .csv/.tsv/.psv",
-    )
-    args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    if args.delimiter is not None:
-        try:
-            validate_delimiter(args.delimiter)
-        except ValueError:
-            logger.error("event=bronze_error error=InvalidDelimiter")
-            return 2
-    try:
-        _validate_source(args.source)
-    except ValueError as error:
-        logger.error(
-            "event=bronze_error error=%s source=%s",
-            type(error).__name__,
-            json.dumps(args.source),
-        )
-        return 2
-    try:
-        if args.pending:
-            count = list_pending(args.source, LANDING_ROOT, LAKE_ROOT, delimiter=args.delimiter)
-            return EXIT_HELD if count else 0
-        summary = ingest_landing(
-            args.source, LANDING_ROOT, LAKE_ROOT, force=args.force, delimiter=args.delimiter
-        )
-    except FileNotFoundError as error:
-        logger.error("event=bronze_error error=%s", json.dumps(str(error)))
-        return 2
-    except ValueError as error:
-        # Config errors: log the type and source only, never the message (it may echo config).
-        logger.error(
-            "event=bronze_error error=%s source=%s", type(error).__name__, json.dumps(args.source)
-        )
-        return 2
-    if summary.failed:
-        return 1
-    return EXIT_HELD if summary.pending else 0
+    """Run the command line (see `bronze_cli.main`); kept so `python -m ingestion.bronze` works."""
+    from ingestion.bronze_cli import main as _main
+
+    return _main(argv)
 
 
 if __name__ == "__main__":
