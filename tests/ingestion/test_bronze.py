@@ -172,8 +172,8 @@ def test_file_changing_during_read_fails(tmp_path: Path, monkeypatch: pytest.Mon
     source.write_text("a\n1\n")
     real_read = bronze.read_csv_as_strings
 
-    def read_then_modify(path: Path) -> pl.LazyFrame:
-        frame = real_read(path)
+    def read_then_modify(path: Path, *args: object, **kwargs: object) -> pl.LazyFrame:
+        frame = real_read(path, *args, **kwargs)
         path.write_text("a\n2\n")
         return frame
 
@@ -391,9 +391,9 @@ def test_file_changing_before_read_fails_rehash_check(
     source.write_text("a\n1\n")
     real_read = bronze.read_csv_as_strings
 
-    def modify_then_read(path: Path) -> pl.LazyFrame:
+    def modify_then_read(path: Path, *args: object, **kwargs: object) -> pl.LazyFrame:
         path.write_text("a\n2\n")  # changes after the first hash, before the load
-        return real_read(path)
+        return real_read(path, *args, **kwargs)
 
     monkeypatch.setattr(bronze, "read_csv_as_strings", modify_then_read)
 

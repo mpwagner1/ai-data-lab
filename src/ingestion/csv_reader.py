@@ -5,6 +5,9 @@ from pathlib import Path
 
 import polars as pl
 
+DEFAULT_SEPARATOR = ","
+DEFAULT_ENCODING = "utf-8"
+
 
 def _has_no_content(path: Path) -> bool:
     """True when the file is zero bytes or only whitespace (so it has no header)."""
@@ -20,8 +23,12 @@ def _scan(path: Path, separator: str, encoding: str) -> pl.LazyFrame:
     return frame.lazy()
 
 
-def read_csv_as_strings(path: Path, separator: str = ",", encoding: str = "utf-8") -> pl.LazyFrame:
-    """Lazily read a delimited file with all columns as strings (no inference or renaming).
+def read_csv_as_strings(
+    path: Path, separator: str = DEFAULT_SEPARATOR, encoding: str = DEFAULT_ENCODING
+) -> pl.LazyFrame:
+    """Read a delimited file with all columns as strings (no inference or renaming).
+
+    UTF-8 files are scanned lazily. Other encodings are decoded fully in memory first.
 
     Raises ValueError for an empty file or a source column starting with `_`, which would
     collide with bronze metadata columns. Messages name columns, never values.

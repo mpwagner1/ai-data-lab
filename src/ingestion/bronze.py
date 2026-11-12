@@ -22,9 +22,9 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
-from ingestion.csv_reader import read_csv_as_strings
+from ingestion.csv_reader import DEFAULT_SEPARATOR, read_csv_as_strings
 from ingestion.metadata import add_bronze_metadata, hash_file
-from ingestion.source_config import SourceConfig, load_source_config
+from ingestion.source_config import SourceConfig, load_source_config, validate_delimiter
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ _SOURCE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 LANDING_ROOT = Path("data/landing")
 LAKE_ROOT = Path("lake")
 # Delimiter implied by the extension. `.txt` and `.dat` have none: they need config or --delimiter.
-_EXTENSION_DELIMITERS = {".csv": ",", ".tsv": "\t", ".psv": "|"}
+_EXTENSION_DELIMITERS = {".csv": DEFAULT_SEPARATOR, ".tsv": "\t", ".psv": "|"}
 _NO_DEFAULT_EXTENSIONS = (".txt", ".dat")
 _LANDING_EXTENSIONS = (*_EXTENSION_DELIMITERS, *_NO_DEFAULT_EXTENSIONS)
 
@@ -92,13 +92,7 @@ def resolve_delimiter(path: Path, config: SourceConfig, flag: str | None) -> str
 
 def _read_delimited(path: Path, config: SourceConfig, flag: str | None) -> pl.LazyFrame:
     separator = resolve_delimiter(path, config, flag)
-    # Only pass non-default options so the plain-CSV call stays `read_csv_as_strings(path)`.
-    options: dict[str, str] = {}
-    if separator != ",":
-        options["separator"] = separator
-    if config.encoding != "utf-8":
-        options["encoding"] = config.encoding
-    return read_csv_as_strings(path, **options)
+    return read_csv_as_strings(path, separator=separator, encoding=config.encoding)
 
 
 READERS: dict[FileFormat, Reader] = {FileFormat.DELIMITED: _read_delimited}
@@ -297,9 +291,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    if args.delimiter is not None and len(args.delimiter) != 1:
-        logger.error("event=bronze_error error=InvalidDelimiter")
-        return 2
+    if args.delimiter is not None:
+        try:
+            validate_delimiter(args.delimiter)
+        except ValueError:
+            logger.error("event=bronze_error error=InvalidDelimiter")
+            return 2
     try:
         _validate_source(args.source)
     except ValueError as error:
@@ -315,6 +312,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     except FileNotFoundError as error:
         logger.error("event=bronze_error error=%s", json.dumps(str(error)))
+        return 2
+    except ValueError as error:
+        # Config errors: log the type and source only, never the message (it may echo config).
+        logger.error(
+            "event=bronze_error error=%s source=%s", type(error).__name__, json.dumps(args.source)
+        )
         return 2
     return 1 if failed else 0
 
