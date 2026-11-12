@@ -16,3 +16,4 @@
 | 2026-11-11 | #19 | builder | Sonnet | PR #20 opened: header-only CSVs are written as zero-row Parquet files so they are skipped on later runs (pytest 54 passed). Awaiting review. |
 | 2026-11-11 | #19 | code-reviewer | Sonnet | PR #20 reviewed: no blockers; 2 minor test gaps (differing-columns header-only read, metadata dtype assertions). |
 | 2026-11-12 | #26 | Alfred | Opus | Wrote plan 2026-11-12-bronze-multi-format.md and ADR 0002. Michael approved the ADR with `_sheet_name` and `--delimiter` additions; docs tasks routed to docs-writer. PR opened. |
+| 2026-11-12 | #28 | builder | Sonnet | Dispatched: bronze multi-format task 1 (reader registry, SourceConfig, delimited reader). Result pending. |
