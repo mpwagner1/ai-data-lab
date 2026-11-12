@@ -17,3 +17,4 @@
 | 2026-11-11 | #19 | code-reviewer | Sonnet | PR #20 reviewed: no blockers; 2 minor test gaps (differing-columns header-only read, metadata dtype assertions). |
 | 2026-11-12 | #26 | Alfred | Opus | Wrote plan 2026-11-12-bronze-multi-format.md and ADR 0002. Michael approved the ADR with `_sheet_name` and `--delimiter` additions; docs tasks routed to docs-writer. PR opened. |
 | 2026-11-12 | #28 | builder | Sonnet | Dispatched: bronze multi-format task 1 (reader registry, SourceConfig, delimited reader). Result pending. |
+| 2026-11-12 | #28 | builder | Sonnet | PR #36 opened and merged by Michael: reader registry, SourceConfig, delimited reader, --delimiter flag (pytest 70 passed, existing tests unchanged; adds pyyaml and types-pyyaml). No code-reviewer pass before merge. |
