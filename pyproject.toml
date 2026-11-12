@@ -8,6 +8,7 @@ dependencies = [
     "dbt-duckdb>=1.11.1",
     "duckdb>=2.0.0",
     "polars>=2.1.0",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
@@ -16,6 +17,7 @@ dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.4",
     "sqlfluff>=4.5.0",
+    "types-pyyaml>=6.0.12.20261111",
 ]
 
 [tool.pytest.ini_options]

@@ -1,5 +1,6 @@
 """Read CSV files for bronze: every value stays a string, exactly as read."""
 
+import io
 from pathlib import Path
 
 import polars as pl
@@ -10,15 +11,24 @@ def _has_no_content(path: Path) -> bool:
     return not path.read_bytes().strip()
 
 
-def read_csv_as_strings(path: Path) -> pl.LazyFrame:
-    """Lazily read a CSV with all columns as strings (no inference, trimming or renaming).
+def _scan(path: Path, separator: str, encoding: str) -> pl.LazyFrame:
+    if encoding.lower().replace("_", "-") in {"utf-8", "utf8"}:
+        return pl.scan_csv(path, separator=separator, infer_schema=False)
+    # Polars only reads UTF-8, so decode other encodings first (in memory, not lazy).
+    text = path.read_bytes().decode(encoding)
+    frame = pl.read_csv(io.BytesIO(text.encode("utf-8")), separator=separator, infer_schema=False)
+    return frame.lazy()
+
+
+def read_csv_as_strings(path: Path, separator: str = ",", encoding: str = "utf-8") -> pl.LazyFrame:
+    """Lazily read a delimited file with all columns as strings (no inference or renaming).
 
     Raises ValueError for an empty file or a source column starting with `_`, which would
     collide with bronze metadata columns. Messages name columns, never values.
     """
     if _has_no_content(path):
         raise ValueError(f"empty file: {path.name}")
-    frame = pl.scan_csv(path, infer_schema=False)
+    frame = _scan(path, separator, encoding)
     reserved = [name for name in frame.collect_schema().names() if name.startswith("_")]
     if reserved:
         raise ValueError(f"source columns start with '_': {reserved}")

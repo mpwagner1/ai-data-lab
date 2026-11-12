@@ -13,8 +13,10 @@ import re
 import secrets
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 
 import duckdb
@@ -22,6 +24,7 @@ import polars as pl
 
 from ingestion.csv_reader import read_csv_as_strings
 from ingestion.metadata import add_bronze_metadata, hash_file
+from ingestion.source_config import SourceConfig, load_source_config
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +32,24 @@ _RUN_TS_FORMAT = "%Y%m%dT%H%M%SZ"
 _SOURCE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 LANDING_ROOT = Path("data/landing")
 LAKE_ROOT = Path("lake")
+# Delimiter implied by the extension. `.txt` and `.dat` have none: they need config or --delimiter.
+_EXTENSION_DELIMITERS = {".csv": ",", ".tsv": "\t", ".psv": "|"}
+_NO_DEFAULT_EXTENSIONS = (".txt", ".dat")
+_LANDING_EXTENSIONS = (*_EXTENSION_DELIMITERS, *_NO_DEFAULT_EXTENSIONS)
+
+
+class FileFormat(Enum):
+    """File formats bronze can read. Later tasks add Excel, JSON and Parquet."""
+
+    DELIMITED = "delimited"
+
+
+Reader = Callable[[Path, SourceConfig, str | None], pl.LazyFrame]
 
 
 @dataclass(frozen=True)
 class IngestResult:
-    """Outcome of one `ingest_csv` call."""
+    """Outcome of one `ingest_file` call."""
 
     file_name: str
     file_hash: str
@@ -61,12 +77,43 @@ def _target_path(source_dir: Path, file_hash: str, run_at: datetime) -> Path:
     return source_dir / partition / f"{file_hash}{run_ts}_{secrets.token_hex(4)}.parquet"
 
 
-def _load_with_metadata(path: Path, file_hash: str, run_at: datetime) -> pl.DataFrame:
+def resolve_delimiter(path: Path, config: SourceConfig, flag: str | None) -> str:
+    """Pick the delimiter: the flag (no-default extensions only), then config, then extension."""
+    extension = path.suffix.lower()
+    if flag is not None and extension not in _EXTENSION_DELIMITERS:
+        return flag
+    if config.delimiter is not None:
+        return config.delimiter
+    default = _EXTENSION_DELIMITERS.get(extension)
+    if default is None:
+        raise ValueError(f"no delimiter for {path.name}: set `delimiter` in config or --delimiter")
+    return default
+
+
+def _read_delimited(path: Path, config: SourceConfig, flag: str | None) -> pl.LazyFrame:
+    separator = resolve_delimiter(path, config, flag)
+    # Only pass non-default options so the plain-CSV call stays `read_csv_as_strings(path)`.
+    options: dict[str, str] = {}
+    if separator != ",":
+        options["separator"] = separator
+    if config.encoding != "utf-8":
+        options["encoding"] = config.encoding
+    return read_csv_as_strings(path, **options)
+
+
+READERS: dict[FileFormat, Reader] = {FileFormat.DELIMITED: _read_delimited}
+
+
+def _load_with_metadata(
+    path: Path, file_hash: str, run_at: datetime, config: SourceConfig, flag: str | None
+) -> pl.DataFrame:
     """Collect right after hashing, then re-hash to prove the file did not change.
 
     Otherwise a file edited mid-read could leave `_file_hash` not matching the rows.
     """
-    lazy = add_bronze_metadata(read_csv_as_strings(path), path.name, file_hash, run_at)
+    lazy = add_bronze_metadata(
+        READERS[FileFormat.DELIMITED](path, config, flag), path.name, file_hash, run_at
+    )
     frame = lazy.collect()
     if hash_file(path) != file_hash:
         raise RuntimeError(f"file changed during ingestion: {path.name}")
@@ -123,9 +170,25 @@ def ingest_csv(
     force: bool = False,
     run_at: datetime | None = None,
 ) -> IngestResult:
-    """Load one CSV into bronze; skip it if its hash was already loaded unless `force`.
+    """Load one CSV into bronze. Thin wrapper over `ingest_file` with default config."""
+    return ingest_file(path, source, lake_root, force=force, run_at=run_at)
+
+
+def ingest_file(
+    path: Path,
+    source: str,
+    lake_root: Path,
+    force: bool = False,
+    run_at: datetime | None = None,
+    config: SourceConfig | None = None,
+    delimiter: str | None = None,
+) -> IngestResult:
+    """Load one file into bronze; skip it if its hash was already loaded unless `force`.
 
     A header-only file is written as a zero-row Parquet file so later runs skip it too.
+
+    `config` holds per-source settings (defaults if None). `delimiter` is the --delimiter flag
+    value; it only applies to files with no extension default (`.txt`, `.dat`).
 
     `run_at` (UTC) is injectable for tests; it defaults to now. Existing files are never
     overwritten: a name collision raises FileExistsError.
@@ -144,7 +207,7 @@ def ingest_csv(
             duration_s=_elapsed(started),
         )
         return IngestResult(path.name, file_hash, 0, skipped=True)
-    frame = _load_with_metadata(path, file_hash, run_at)
+    frame = _load_with_metadata(path, file_hash, run_at, config or SourceConfig(), delimiter)
     target = _target_path(source_dir, file_hash, run_at)
     _publish_new_file(frame, target)
     _log(
@@ -168,8 +231,17 @@ def read_bronze(source: str, lake_root: Path) -> duckdb.DuckDBPyRelation:
     )
 
 
-def ingest_landing(source: str, landing_root: Path, lake_root: Path, force: bool) -> int:
-    """Ingest every CSV under `<landing_root>/<source>/`; return how many files failed.
+def ingest_landing(
+    source: str,
+    landing_root: Path,
+    lake_root: Path,
+    force: bool,
+    delimiter: str | None = None,
+    config_root: Path | None = None,
+) -> int:
+    """Ingest every delimited file (.csv .tsv .psv .txt .dat) in `<landing_root>/<source>/`.
+
+    Returns how many files failed.
 
     One bad file does not stop the rest. Failures are logged with the error type and
     file name only (messages can carry values, so they are not logged).
@@ -180,7 +252,12 @@ def ingest_landing(source: str, landing_root: Path, lake_root: Path, force: bool
     if not folder.is_dir():
         raise FileNotFoundError(f"landing folder not found: {folder}")
     _warn_stale_temp_files(source, _source_dir(lake_root, source))
-    files = sorted(folder.glob("*.csv"))
+    config = (
+        load_source_config(source)
+        if config_root is None
+        else load_source_config(source, config_root)
+    )
+    files = sorted(p for p in folder.iterdir() if p.suffix.lower() in _LANDING_EXTENSIONS)
     if not files:
         logger.warning("event=bronze_no_files source=%s", json.dumps(source))
         return 0
@@ -188,7 +265,9 @@ def ingest_landing(source: str, landing_root: Path, lake_root: Path, force: bool
     written = skipped = 0
     for path in files:
         try:
-            result = ingest_csv(path, source, lake_root, force=force)
+            result = ingest_file(
+                path, source, lake_root, force=force, config=config, delimiter=delimiter
+            )
         except Exception as error:  # noqa: BLE001 - keep going; reported via exit code
             failed += 1
             _log("bronze_error", source=source, file_name=path.name, error=type(error).__name__)
@@ -208,10 +287,19 @@ def ingest_landing(source: str, landing_root: Path, lake_root: Path, force: bool
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ingestion.bronze", description=__doc__)
-    parser.add_argument("source", help="source name; reads data/landing/<source>/*.csv")
+    parser.add_argument(
+        "source", help="source name; reads delimited files in data/landing/<source>/"
+    )
     parser.add_argument("--force", action="store_true", help="reload files already ingested")
+    parser.add_argument(
+        "--delimiter",
+        help="single character for .txt/.dat files; beats config, never changes .csv/.tsv/.psv",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    if args.delimiter is not None and len(args.delimiter) != 1:
+        logger.error("event=bronze_error error=InvalidDelimiter")
+        return 2
     try:
         _validate_source(args.source)
     except ValueError as error:
@@ -222,7 +310,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        failed = ingest_landing(args.source, LANDING_ROOT, LAKE_ROOT, force=args.force)
+        failed = ingest_landing(
+            args.source, LANDING_ROOT, LAKE_ROOT, force=args.force, delimiter=args.delimiter
+        )
     except FileNotFoundError as error:
         logger.error("event=bronze_error error=%s", json.dumps(str(error)))
         return 2
