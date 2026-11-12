@@ -424,3 +424,34 @@ def test_parquet_nested_non_finite_floats_kept(tmp_path: Path) -> None:
     assert out["st"].to_list() == ['{"f":NaN,"g":inf,"h":1e+20,"i":-inf,"s":"x"}', None]
     assert out["li"].to_list() == ["[1.0,NaN,null,-inf]", None]
     assert out["mp"].to_list() == ['[{"k":"a","v":NaN}]', None]
+
+
+def test_parquet_nested_non_finite_in_fixed_size_arrays_and_float32_kept(tmp_path: Path) -> None:
+    nan, inf = float("nan"), float("inf")
+    frame = pl.DataFrame(
+        {
+            "arr": pl.Series([[1.0, nan, -inf], None], dtype=pl.Array(pl.Float64, 3)),
+            "arr32": pl.Series([[nan, inf], None], dtype=pl.Array(pl.Float32, 2)),
+            "li32": pl.Series([[0.5, nan, None, -inf], None], dtype=pl.List(pl.Float32)),
+            "st32": pl.Series(
+                [{"f": nan, "g": -inf}, None], dtype=pl.Struct({"f": pl.Float32, "g": pl.Float32})
+            ),
+            "f32": pl.Series([nan, 0.1], dtype=pl.Float32),
+        }
+    )
+    out = _frame(read_parquet_as_strings(_parquet(tmp_path / "d.parquet", frame), CONFIG, None))
+    assert out["arr"].to_list() == ["[1.0,NaN,-inf]", None]
+    assert out["arr32"].to_list() == ["[NaN,inf]", None]
+    assert out["li32"].to_list() == ["[0.5,NaN,null,-inf]", None]
+    assert out["st32"].to_list() == ['{"f":NaN,"g":-inf}', None]
+    assert out["f32"].to_list() == ["NaN", "0.1"]
+
+
+def test_parquet_array_of_structs_with_non_finite_floats_kept(tmp_path: Path) -> None:
+    nan = float("nan")
+    inner = pl.Struct({"k": pl.String, "v": pl.Float64})
+    frame = pl.DataFrame(
+        {"a": pl.Series([[{"k": "x", "v": nan}, {"k": "y", "v": 2.0}]], dtype=pl.Array(inner, 2))}
+    )
+    out = _frame(read_parquet_as_strings(_parquet(tmp_path / "d.parquet", frame), CONFIG, None))
+    assert out["a"].to_list() == ['[{"k":"x","v":NaN},{"k":"y","v":2.0}]']

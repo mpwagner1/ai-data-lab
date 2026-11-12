@@ -1,6 +1,7 @@
 import logging
 import zipfile
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 
 import openpyxl
@@ -284,3 +285,76 @@ def test_merged_range_fills_only_its_top_left_cell(tmp_path: Path) -> None:
     book["S"].merge_cells("A2:A3")  # keeps only A2 ("a"); A3 is emptied by the merge
     book.save(path)
     assert _ingest(path, tmp_path)["id"].to_list() == ["a", None]
+
+
+# Issue #33 items 7 and 9. These document what calamine hands back; our code must not cast.
+def test_date_time_bool_and_percent_cells_arrive_in_calamines_string_form(tmp_path: Path) -> None:
+    cells = [
+        (1, 1, "d"),
+        (1, 2, "dt"),
+        (1, 3, "t"),
+        (1, 4, "b"),
+        (1, 5, "pct"),
+        (2, 1, date(2026, 1, 2)),
+        (2, 2, datetime(2026, 1, 2, 3, 4, 5)),
+        (2, 3, time(3, 4, 5)),
+        (2, 4, True),
+        (2, 5, 0.256),
+    ]
+    path = _workbook(tmp_path / "w.xlsx", {"S": cells})
+    book = openpyxl.load_workbook(path)
+    book["S"]["E2"].number_format = "0.0%"  # shown as 25.6%, stored as 0.256
+    book.save(path)
+
+    frame = _ingest(path, tmp_path)
+
+    assert frame.select("d", "dt", "t", "b", "pct").row(0) == (
+        "2026-01-02 00:00:00",  # a date is shown as a datetime (date versus datetime is lost)
+        "2026-01-02 03:04:05",
+        "1899-12-31 03:04:05",  # a time of day gets calamine's epoch date
+        "true",
+        "0.256",  # the stored value, not the displayed "25.6%"
+    )
+    assert {frame.schema[c] for c in ("d", "dt", "t", "b", "pct")} == {pl.String}
+
+
+def test_formula_without_a_cached_value_is_null(tmp_path: Path) -> None:
+    cells = [(1, 1, "f"), (1, 2, "k"), (2, 1, "=1+2"), (2, 2, "x")]  # openpyxl stores no cache
+    frame = _ingest(_workbook(tmp_path / "w.xlsx", {"S": cells}), tmp_path)
+    assert frame.select("f", "k").rows() == [(None, "x")]
+
+
+def _xlsm(path: Path) -> Path:
+    _workbook(path.with_suffix(".xlsx"), {"S": _table([("id", "n"), ("007", "x")])}).rename(path)
+    return path
+
+
+@pytest.mark.parametrize("extension", [".xlsm", ".ods"])
+def test_xlsm_and_ods_files_load_through_the_cli(
+    project: Path, ods_bytes: Callable[..., bytes], extension: str
+) -> None:
+    path = _landing(project) / f"w{extension}"
+    if extension == ".ods":
+        path.write_bytes(ods_bytes([["id", "n"], ["007", "x"]]))
+    else:
+        _xlsm(path)
+
+    assert main(["demo"]) == 0
+
+    frame = _bronze(project / "lake")
+    assert frame.select("id", "n").rows() == [("007", "x")]
+    assert frame["_sheet_name"].to_list() == ["S"]
+    assert frame["_file_name"].to_list() == [path.name]
+    assert [p.suffix for p in (project / "lake" / "raw" / "demo").rglob("*.*")] == [extension]
+
+
+def test_ods_date_and_number_cells_arrive_as_stored_not_as_shown(
+    tmp_path: Path, ods_bytes: Callable[..., bytes]
+) -> None:
+    # Pins calamine's ODS forms (the cell's displayed text is "shown"); our code does not cast.
+    path = tmp_path / "w.ods"
+    path.write_bytes(ods_bytes([["d", "n"], [("date", "2026-01-02"), ("float", "2.50")]]))
+
+    frame = _ingest(path, tmp_path)
+
+    assert frame.select("d", "n").rows() == [("2026-01-02", "2.5")]

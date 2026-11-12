@@ -2,10 +2,13 @@ import gzip
 import hashlib
 import io
 import logging
+import os
+import re
 import struct
 import tarfile
 import tempfile
 import traceback
+import uuid
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -127,7 +130,14 @@ HOSTILE_NAMES = [
 
 
 @pytest.fixture
-def temp_root(project: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def real_temp_roots() -> list[Path]:
+    """The REAL system temp root and /tmp, taken before `temp_root` redirects `tempfile`."""
+    roots = {Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()}
+    return sorted(roots)
+
+
+@pytest.fixture
+def temp_root(project: Path, monkeypatch: pytest.MonkeyPatch, real_temp_roots: list[Path]) -> Path:
     """Redirect the system temp root into the test tree, as a sibling of the lake and landing."""
     root = project / "systmp"
     root.mkdir()
@@ -159,14 +169,59 @@ def _spy_on_extraction(
     return snapshots
 
 
+_STRAY_NAME = re.compile(r"member-\d+.*|escape-.*")
+
+
+def _snapshot_entries(roots: list[Path]) -> dict[Path, set[str]]:
+    return {root: set(os.listdir(root)) for root in roots}
+
+
+def _is_ours(path: Path, token: str) -> bool:
+    """True for a file or tree that this test's code could have created (name or content)."""
+    if _STRAY_NAME.fullmatch(path.name):
+        return True
+    files = [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
+    for file in files:
+        if _STRAY_NAME.fullmatch(file.name):
+            return True
+        try:
+            if token.encode() in file.read_bytes()[:4096]:
+                return True
+        except OSError:
+            continue  # another process's file we cannot read is not ours
+    return False
+
+
+def _stray_writes(before: dict[Path, set[str]], token: str) -> list[str]:
+    """New entries in the real temp roots that match what an extraction would create.
+
+    Other processes also write to the real temp dir, so only entries whose name looks like ours
+    (`member-<n>...`, `escape-...`) or whose content carries this test's unique token count.
+    """
+    found: list[str] = []
+    for root, names in before.items():
+        for name in sorted(set(os.listdir(root)) - names):
+            if _is_ours(root / name, token):
+                found.append(str(root / name))
+    return found
+
+
 def test_hostile_member_names_cannot_escape(
-    project: Path, temp_root: Path, monkeypatch: pytest.MonkeyPatch
+    project: Path,
+    temp_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_temp_roots: list[Path],
 ) -> None:
-    members = {name: f"id\n{i}\n".encode() for i, name in enumerate(HOSTILE_NAMES)}
+    token = uuid.uuid4().hex  # makes our files recognisable in a temp dir other processes share
+    members = {name: f"id,tag\n{i},{token}\n".encode() for i, name in enumerate(HOSTILE_NAMES)}
     archive = _zip(_landing(project) / "evil.zip", members)
     snapshots = _spy_on_extraction(monkeypatch, project, temp_root)
+    real_before = _snapshot_entries(real_temp_roots)
 
     assert main(["demo"]) == 0
+
+    # (e) a hard-coded real temp path (not reached by the `tempfile` redirect) stays untouched
+    assert _stray_writes(real_before, token) == []
 
     assert len(snapshots) == len(members)
     for seen in snapshots:  # (a') while a member is on disk, only its private dir holds it
@@ -347,10 +402,20 @@ def test_broken_archive_fails_alone_and_keeps_raw_copy(
     assert 'error="ArchiveReadError"' in caplog.text
 
 
-def test_corrupt_gzip_fails(project: Path) -> None:
-    (_landing(project) / "a.csv.gz").write_bytes(gzip.compress(b"id\n1\n")[:-6] + b"zzzzzz")
+def test_corrupt_gzip_fails(project: Path, caplog: pytest.LogCaptureFixture) -> None:
+    good = gzip.compress(f"id\n{SECRET_TEXT}\n".encode())
+    (_landing(project) / "a.csv.gz").write_bytes(good[:-6] + b"zzzzzz")
+    caplog.set_level(logging.INFO)
+
     assert main(["demo"]) == 1
+
     assert _raw_count(project) == 1
+    assert _bronze_count(project) == 0  # no bronze file, not even a partial one
+    assert not list((project / "lake" / "bronze").rglob("*"))
+    assert "event=bronze_error" in caplog.text
+    assert 'error="ArchiveReadError"' in caplog.text
+    assert SECRET_TEXT not in caplog.text  # the error log carries no content
+    assert "event=bronze_write" not in caplog.text
 
 
 def test_pending_expands_archives_and_writes_nothing(
@@ -363,7 +428,8 @@ def test_pending_expands_archives_and_writes_nothing(
 
     assert not (project / "lake").exists()
     assert caplog.text.count("event=bronze_pending ") == 2
-    assert "member=1" in caplog.text
+    # anchored: a bare "member=1" would also match member=10
+    assert re.findall(r"\bmember=(\d+)(?=\s|$)", caplog.text) == ["1", "2"]
     assert 'reason="ready"' in caplog.text
     assert 'reason="needs_config"' in caplog.text
     assert main(["demo", "--delimiter", "|"]) == 0
@@ -616,6 +682,18 @@ def test_one_more_than_max_members_fails_the_archive(project: Path) -> None:
     assert len(_raw_files(project)) == 1
 
 
+def test_literal_101_members_fail_the_archive_whatever_the_cap_constant_is(
+    project: Path,
+) -> None:
+    # A literal 101, not MAX_MEMBERS + 1: this still guards the boundary if the pin above moves.
+    _zip(_landing(project) / "pack.zip", _members(101))
+
+    assert main(["demo"]) == 1
+
+    assert _bronze_count(project) == 0
+    assert len(_raw_files(project)) == 1
+
+
 def test_one_more_than_max_members_says_too_many_members(tmp_path: Path) -> None:
     path = _zip(tmp_path / "pack.zip", _members(archives.MAX_MEMBERS + 1))
 
@@ -697,3 +775,57 @@ def test_gz_whose_content_is_a_zip_is_held_as_no_reader(
     assert _bronze_count(project) == 0
     assert caplog.text.count('reason="no_reader"') == 1
     assert [p.read_bytes() for p in _raw_files(project)] == [path.read_bytes()]
+
+
+# Issue #33 item 7: workbook members with the other whitelisted extensions.
+def _xlsm_bytes(tmp_path: Path) -> bytes:
+    book = openpyxl.Workbook()
+    book.active.append(["id", "n"])
+    book.active.append(["007", "x"])
+    path = tmp_path / "book.xlsm"
+    book.save(path)
+    return path.read_bytes()
+
+
+@pytest.mark.parametrize("extension", [".xlsm", ".ods"])
+def test_zip_member_with_a_macro_or_ods_extension_loads_as_a_workbook(
+    project: Path, ods_bytes: Callable[..., bytes], extension: str
+) -> None:
+    data = _xlsm_bytes(project) if extension == ".xlsm" else ods_bytes([["id", "n"], ["007", "x"]])
+    _zip(_landing(project) / "pack.zip", {f"book{extension}": data, "a.csv": b"id\n1\n"})
+
+    assert main(["demo"]) == 0
+
+    frame = _frames(project)
+    book = frame.filter(pl.col("_file_name") == f"pack.zip!book{extension}")
+    assert book.select("id", "n").rows() == [("007", "x")]
+    assert book["_sheet_name"].to_list() == ["Sheet" if extension == ".xlsm" else "S"]
+    assert _bronze_count(project) == 2
+
+
+def test_zip_member_that_claims_to_be_xls_but_is_not_a_workbook_fails_not_held(
+    project: Path,
+) -> None:
+    # A real .xls cannot be built without a new dependency. An OLE signature with no workbook
+    # inside stands in for it and checks the failure path: the file fails, the others still load.
+    _zip(
+        _landing(project) / "pack.zip",
+        {"old.xls": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 600, "a.csv": b"id\n1\n"},
+    )
+
+    assert main(["demo"]) == 1
+
+    assert _names(project) == {"pack.zip!a.csv"}
+    assert _raw_count(project) == 1
+
+
+def test_gz_of_an_xlsm_workbook_is_expanded_and_read_by_its_member_name(
+    project: Path,
+) -> None:
+    (_landing(project) / "book.xlsm.gz").write_bytes(gzip.compress(_xlsm_bytes(project)))
+
+    assert main(["demo"]) == 0
+
+    frame = _frames(project)
+    assert set(frame["_file_name"]) == {"book.xlsm.gz!book.xlsm"}
+    assert frame["id"].to_list() == ["007"]
