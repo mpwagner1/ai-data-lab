@@ -33,3 +33,5 @@
 | 2026-11-12 | #44 | builder (resumed) | Sonnet | Dispatched on PR #46 for review findings 1, 2, 3, 4, 5. Result pending. |
 | 2026-11-12 | #44 | builder (resumed) | Sonnet | PR #46 fixes: no-NUL rule and low-order-byte wrong-endian check for UTF-16/32 configs, UTF-8 BOM held with non-utf-8-sig codecs, docstring and test fixes (pytest 226 passed). |
 | 2026-11-12 | #44 | code-reviewer | Sonnet | PR #46 third review: merge. ~200 cases executed, no wrong-encoding file loads silently. One medium: `_wrong_byte_order` falsely holds some correct UTF-16 CJK files whose characters have a zero low byte (visible exit 3, not silent). |
+| 2026-11-12 | #44 | - | - | PRs #46 and #47 merged by Michael. The CJK false hold from the third review is folded into QA pass #33 (xfail regression tests; the code fix goes to a builder issue after QA reports). |
+| 2026-11-12 | #30 | builder | Sonnet | Dispatched: multi-format task 3 (Excel reader, `_sheet_name`, `header_row`, sheet-row `_row_number`). Result pending. |
