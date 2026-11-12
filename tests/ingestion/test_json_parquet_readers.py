@@ -1,5 +1,6 @@
 import logging
-from datetime import UTC, date, datetime, time
+import traceback
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -284,10 +285,10 @@ def test_bad_files_fail_alone_and_batch_continues(
     project: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     landing = project / "data" / "landing" / "demo"
-    _json(landing / "a_good.json", '[{"id": "1"}]')
-    _json(landing / "b_bad.json", f'[{{"{SECRET_KEY}": "{SECRET}", ')
-    (landing / "c_trunc.parquet").write_bytes(b"PAR1" + SECRET.encode() + b"PAR1")
-    _json(landing / "d_ndjson.ndjson", f'{{"a": "{SECRET}"}}\n[1]\n')
+    _json(landing / "z_good.json", '[{"id": "1"}]')
+    _json(landing / "a_bad.json", f'[{{"{SECRET_KEY}": "{SECRET}", ')
+    (landing / "b_trunc.parquet").write_bytes(b"PAR1" + SECRET.encode() + b"PAR1")
+    _json(landing / "c_ndjson.ndjson", f'{{"a": "{SECRET}"}}\n[1]\n')
     with caplog.at_level(logging.INFO):
         assert main(["demo"]) == 1
     frame = _bronze(project / "lake" / "bronze")
@@ -298,3 +299,128 @@ def test_bad_files_fail_alone_and_batch_continues(
     assert SECRET_KEY not in caplog.text
     assert caplog.text.count("event=bronze_error") == 3
     assert "event=bronze_unparsed" not in caplog.text
+
+
+def _assert_clean(exc: BaseException, secret: str) -> None:
+    assert exc.__context__ is None
+    assert exc.__cause__ is None
+    assert secret not in "".join(traceback.format_exception(exc))
+
+
+def test_invalid_json_error_has_no_context(tmp_path: Path) -> None:
+    path = _json(tmp_path / "d.json", f'[{{"a": "{SECRET}", ')
+    with pytest.raises(JsonReadError) as info:
+        read_json(path, CONFIG, None)
+    _assert_clean(info.value, SECRET)
+
+
+def test_bad_ndjson_line_error_has_no_context(tmp_path: Path) -> None:
+    path = _json(tmp_path / "d.ndjson", f'{{"a": "{SECRET}"}}\n{{"a": "{SECRET}", \n')
+    with pytest.raises(JsonReadError) as info:
+        read_ndjson(path, CONFIG, None)
+    _assert_clean(info.value, SECRET)
+
+
+def test_truncated_parquet_error_has_no_context(tmp_path: Path) -> None:
+    good = _parquet(tmp_path / "g.parquet", pl.DataFrame({"a": [SECRET] * 50}))
+    path = tmp_path / "t.parquet"
+    path.write_bytes(good.read_bytes()[:-20])
+    with pytest.raises(ParquetReadError) as info:
+        read_parquet_as_strings(path, CONFIG, None)
+    _assert_clean(info.value, SECRET)
+
+
+def test_deep_nesting_fails_cleanly(tmp_path: Path) -> None:
+    depth = 100_000
+    path = _json(tmp_path / "d.json", '[{"a": ' + "[" * depth + SECRET + "]" * depth + "}]")
+    with pytest.raises(JsonReadError) as info:
+        read_json(path, CONFIG, None)
+    _assert_clean(info.value, SECRET)
+    assert SECRET not in str(info.value)
+
+
+def test_lone_surrogate_fails_the_file_not_held(tmp_path: Path) -> None:
+    path = _json(tmp_path / "d.json", '[{"a": "\\ud800"}]')
+    with pytest.raises(JsonReadError) as info:
+        read_json(path, CONFIG, None)
+    _assert_clean(info.value, "ud800")
+    nd = _json(tmp_path / "d.ndjson", '{"a": "\\ud800"}\n')
+    with pytest.raises(JsonReadError):
+        read_ndjson(nd, CONFIG, None)
+
+
+def test_cli_lone_surrogate_fails_and_non_utf8_is_held(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    landing = project / "data" / "landing" / "demo"
+    _json(landing / "a_surrogate.json", '[{"a": "\\ud800"}]')
+    _json(landing / "z_good.json", '[{"id": "1"}]')
+    with caplog.at_level(logging.INFO):
+        assert main(["demo"]) == 1
+    assert _bronze(project / "lake" / "bronze")["id"].to_list() == ["1"]
+    assert len(list((project / "lake" / "raw").rglob("*.json"))) == 2
+    assert "event=bronze_unparsed" not in caplog.text
+    (landing / "a_surrogate.json").unlink()
+    (landing / "z_good.json").unlink()
+    (landing / "b_latin.json").write_bytes('[{"a": "é"}]'.encode("cp1252"))
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert main(["demo"]) == 3
+    assert 'reason="encoding"' in caplog.text
+
+
+def test_top_level_numeric_tokens_keep_text(tmp_path: Path) -> None:
+    text = '[{"a": -0, "b": 1E+3, "c": NaN, "d": Infinity, "e": -Infinity, "f": -0.0}]'
+    assert _read_json(tmp_path, text).row(0) == (
+        "-0",
+        "1E+3",
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        "-0.0",
+    )
+
+
+def test_nested_non_finite_tokens_kept_as_source_text(tmp_path: Path) -> None:
+    frame = _read_json(tmp_path, '[{"a": [1.50, NaN, -Infinity, 1E+3, -0]}]')
+    assert frame.row(0) == ("[1.50,NaN,-Infinity,1E+3,-0]",)
+
+
+def test_single_line_object_json_is_one_ndjson_row(tmp_path: Path) -> None:
+    path = _json(tmp_path / "d.json", '{"data": [{"a": 1}]}')
+    result = ingest_file(path, "demo", tmp_path / "lake", run_at=RUN_AT)
+    assert result.rows == 1
+    assert _bronze(tmp_path / "lake")["data"].to_list() == ['[{"a":1}]']
+
+
+def test_parquet_duration_and_timestamp_units(tmp_path: Path) -> None:
+    frame = pl.DataFrame(
+        {
+            "dur": pl.Series([timedelta(seconds=90, microseconds=5), None, timedelta(days=-1)]),
+            "ms": pl.Series([datetime(2020, 1, 2, 3, 4, 5)])
+            .cast(pl.Datetime("ms"))
+            .extend_constant(None, 2),
+            "ns": pl.Series([datetime(2020, 1, 2, 3, 4, 5)])
+            .cast(pl.Datetime("ns"))
+            .extend_constant(None, 2),
+        }
+    )
+    out = _frame(read_parquet_as_strings(_parquet(tmp_path / "d.parquet", frame), CONFIG, None))
+    assert out["dur"].to_list() == ["PT1M30.000005S", None, "-P1D"]
+    assert out["ms"][0] == "2020-01-02 03:04:05.000"
+    assert out["ns"][0] == "2020-01-02 03:04:05.000000000"
+
+
+def test_parquet_nested_non_finite_floats_kept(tmp_path: Path) -> None:
+    nan, inf = float("nan"), float("inf")
+    frame = pl.DataFrame(
+        {
+            "st": [{"f": nan, "g": inf, "h": 1e20, "i": -inf, "s": "x"}, None],
+            "li": [[1.0, nan, None, -inf], None],
+            "mp": [[{"k": "a", "v": nan}], None],
+        }
+    )
+    out = _frame(read_parquet_as_strings(_parquet(tmp_path / "d.parquet", frame), CONFIG, None))
+    assert out["st"].to_list() == ['{"f":NaN,"g":inf,"h":1e+20,"i":-inf,"s":"x"}', None]
+    assert out["li"].to_list() == ["[1.0,NaN,null,-inf]", None]
+    assert out["mp"].to_list() == ['[{"k":"a","v":NaN}]', None]

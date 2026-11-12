@@ -17,17 +17,25 @@ not detected or fixed. `_row_number` is the 1-based position among records (blan
 are skipped and not counted).
 
 A UTF-8 byte order mark is ignored. The file is decoded with `config.encoding`; a file that does
-not decode raises UnicodeError, which bronze holds as `encoding` (same as CSV).
+not decode raises UnicodeDecodeError, which bronze holds as `encoding` (same as CSV). That is the
+only hold: any other failure (including a lone surrogate escape, which is valid JSON but cannot
+be stored) fails the file with JsonReadError.
+
+Nested `NaN`, `Infinity` and `-Infinity` (Python accepts them) are kept as bare tokens, so such a
+cell is not strictly valid JSON; it is the source text, not changed. A `.json` file that is one
+single-line object (for example an API envelope `{"data":[...]}`) is detected as NDJSON and read
+as one row whose nested value is a JSON string; detection is not changed for this.
 
 Memory: a JSON array is loaded in full (text plus parsed records), so it is unbounded for large
 files. NDJSON is read line by line and only the column lists are kept. Caps come with archives.
 
 Errors name the error type and the file only, never record text, key names, values or parser
-messages. Raises are chained with `from None` so library text is not carried.
+messages. A library error is never raised from inside its `except` block (that would leave it as
+`__context__`, and a JSONDecodeError holds the whole document), so the error has no context.
 """
 
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import polars as pl
@@ -142,33 +150,44 @@ def _ndjson_items(path: Path, encoding: str) -> Iterable[object]:
         yield decoder.decode(line.strip())
 
 
-def _build(path: Path, load: Iterable[object] | list[object]) -> list[ParsedPart]:
+def _guarded[T](path: Path, work: Callable[[], T]) -> T:
+    """Run `work` and return its result.
+
+    A UnicodeDecodeError (the file does not decode) and our own JsonReadError pass through. Any
+    other error is reduced to its type name inside the block and JsonReadError is raised after
+    it, so the result has no `__context__` or `__cause__` (library errors can hold file text).
+    """
+    problem = ""
     try:
-        columns = _records(path, load)
-    except (UnicodeError, JsonReadError):
+        return work()
+    except (UnicodeDecodeError, JsonReadError):
         raise
     except Exception as error:
-        raise _fail(path, type(error).__name__) from None
-    return [ParsedPart(None, columns.frame(path))]
+        problem = type(error).__name__
+    raise _fail(path, problem)
+
+
+def _parse(path: Path, load: Iterable[object]) -> list[ParsedPart]:
+    return [ParsedPart(None, _records(path, load).frame(path))]
+
+
+def _read_text(path: Path, encoding: str) -> str:
+    text = path.read_text(encoding=encoding)
+    if not text.strip():
+        raise _fail(path, "empty file")
+    return text
 
 
 def read_json(path: Path, config: SourceConfig, flag: str | None) -> list[ParsedPart]:
     """Read a JSON file holding one array of objects as a single all-string part.
 
     Raises JsonReadError for invalid JSON, a non-array top level, a non-object element, an empty
-    array or file, records with no keys or a key starting with `_`. UnicodeError (not decodable)
-    is left to bronze to hold. `flag` (the --delimiter value) does not apply.
+    array or file, records with no keys, a key starting with `_` or a value that cannot be stored.
+    UnicodeDecodeError (not decodable) is left to bronze to hold. `flag` (the --delimiter value)
+    does not apply.
     """
-    try:
-        text = path.read_text(encoding=config.encoding)
-        if not text.strip():
-            raise _fail(path, "empty file")
-        items = _array_items(path, text)
-    except (UnicodeError, JsonReadError):
-        raise
-    except Exception as error:
-        raise _fail(path, type(error).__name__) from None
-    return _build(path, items)
+    items = _guarded(path, lambda: _array_items(path, _read_text(path, config.encoding)))
+    return _guarded(path, lambda: _parse(path, items))
 
 
 def read_ndjson(path: Path, config: SourceConfig, flag: str | None) -> list[ParsedPart]:
@@ -177,4 +196,4 @@ def read_ndjson(path: Path, config: SourceConfig, flag: str | None) -> list[Pars
     Raises JsonReadError like `read_json`, with a line that is not an object in place of a
     non-array top level. `flag` (the --delimiter value) does not apply.
     """
-    return _build(path, _ndjson_items(path, config.encoding))
+    return _guarded(path, lambda: _parse(path, _ndjson_items(path, config.encoding)))
