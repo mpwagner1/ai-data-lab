@@ -18,3 +18,5 @@
 | 2026-11-12 | #26 | Alfred | Opus | Wrote plan 2026-11-12-bronze-multi-format.md and ADR 0002. Michael approved the ADR with `_sheet_name` and `--delimiter` additions; docs tasks routed to docs-writer. PR opened. |
 | 2026-11-12 | #28 | builder | Sonnet | Dispatched: bronze multi-format task 1 (reader registry, SourceConfig, delimited reader). Result pending. |
 | 2026-11-12 | #28 | builder | Sonnet | PR #36 opened and merged by Michael: reader registry, SourceConfig, delimited reader, --delimiter flag (pytest 70 passed, existing tests unchanged; adds pyyaml and types-pyyaml). No code-reviewer pass before merge. |
+| 2026-11-12 | #28 | code-reviewer | Sonnet | Merged PR #36 reviewed after the fact: no blockers; 3 findings to fix before task 2 (config errors escape main, delimiter must be one byte, test-driven reader-call workaround) and smaller items (comment on PR #36). |
+| 2026-11-12 | #38 | builder | Sonnet | Dispatched: multi-format task 1b (config and delimiter validation, reader call cleanup). Result pending. |
