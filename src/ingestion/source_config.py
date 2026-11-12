@@ -9,7 +9,10 @@ from pathlib import Path
 
 import yaml
 
+from ingestion.csv_reader import DEFAULT_ENCODING
+
 CONFIG_ROOT = Path("config/sources")
+_FORBIDDEN_DELIMITERS = frozenset({'"', "\n", "\r"})
 _KNOWN_KEYS = frozenset({"delimiter", "encoding", "format", "sheets"})
 
 
@@ -18,17 +21,47 @@ class SourceConfig:
     """Settings for one source. `format` and `sheets` are stored now and used by later readers."""
 
     delimiter: str | None = None
-    encoding: str = "utf-8"
+    encoding: str = DEFAULT_ENCODING
     format: str | None = None
     sheets: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
-        if self.delimiter is not None and len(self.delimiter) != 1:
-            raise ValueError("delimiter must be a single character")
-        try:
-            codecs.lookup(self.encoding)
-        except LookupError as error:
-            raise ValueError(f"unknown encoding: {self.encoding!r}") from error
+        if self.delimiter is not None:
+            validate_delimiter(self.delimiter)
+        validate_encoding(self.encoding)
+
+
+def validate_delimiter(delimiter: object) -> None:
+    """Raise ValueError unless `delimiter` is one byte in UTF-8 and not a quote or newline.
+
+    Polars needs a single-byte separator. Messages never echo the value.
+    """
+    if not isinstance(delimiter, str):
+        raise ValueError("delimiter must be a string")
+    if delimiter in _FORBIDDEN_DELIMITERS:
+        raise ValueError("delimiter must not be a quote or a newline")
+    if len(delimiter.encode("utf-8")) != 1:
+        raise ValueError("delimiter must be exactly one byte in UTF-8")
+
+
+def validate_encoding(encoding: object) -> None:
+    """Raise ValueError unless `encoding` names a text codec (so not `hex`, `base64`, ...)."""
+    if not isinstance(encoding, str):
+        raise ValueError("encoding must be a string")
+    try:
+        info = codecs.lookup(encoding)
+    except LookupError as error:
+        raise ValueError("unknown encoding") from error
+    if not getattr(info, "_is_text_encoding", True):
+        raise ValueError("encoding is not a text encoding")
+
+
+def _parse_sheets(sheets: object) -> tuple[str, ...] | None:
+    if sheets is None:
+        return None
+    if not isinstance(sheets, list) or not all(isinstance(name, str) for name in sheets):
+        raise ValueError("sheets must be a list of strings")
+    return tuple(sheets)
 
 
 def parse_source_config(raw: object) -> SourceConfig:
@@ -37,19 +70,25 @@ def parse_source_config(raw: object) -> SourceConfig:
         return SourceConfig()
     if not isinstance(raw, dict):
         raise ValueError("source config must be a mapping")
-    unknown = sorted(set(raw) - _KNOWN_KEYS)
+    unknown = sorted(str(key) for key in set(raw) - _KNOWN_KEYS)
     if unknown:
         raise ValueError(f"unknown source config keys: {unknown}")
-    sheets = raw.get("sheets")
-    if sheets is not None:
-        sheets = tuple(str(name) for name in sheets)
+    sheets = _parse_sheets(raw.get("sheets"))
     values = {key: value for key, value in raw.items() if key != "sheets" and value is not None}
     return SourceConfig(sheets=sheets, **values)
 
 
 def load_source_config(source: str, config_root: Path = CONFIG_ROOT) -> SourceConfig:
-    """Load `<config_root>/<source>.yaml`; a missing file means all defaults."""
+    """Load `<config_root>/<source>.yaml`; a missing file means all defaults.
+
+    Raises ValueError for unreadable or invalid config. The YAML parser's message is dropped
+    because it can quote config text.
+    """
     path = config_root / f"{source}.yaml"
     if not path.is_file():
         return SourceConfig()
-    return parse_source_config(yaml.safe_load(path.read_text(encoding="utf-8")))
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, UnicodeDecodeError) as error:
+        raise ValueError(f"invalid config file {path.name}: {type(error).__name__}") from None
+    return parse_source_config(raw)
