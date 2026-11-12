@@ -22,3 +22,4 @@
 | 2026-11-12 | #38 | builder | Sonnet | Dispatched: multi-format task 1b (config and delimiter validation, reader call cleanup). Result pending. |
 | 2026-11-12 | #38 | builder | Sonnet | PR #40 opened: config errors exit 2 without config text, single-byte delimiter and text-codec validation, reader call cleanup (pytest 92 passed). |
 | 2026-11-12 | #38 | code-reviewer | Sonnet | PR #40 reviewed: no blockers; 3 minor items (private _is_text_encoding fails open, unknown-key error message names config keys, small test gaps). |
+| 2026-11-12 | #29 | builder | Sonnet | Dispatched: multi-format task 2 (raw zone, detection, pending, exit code 3), plus config.format dispatch and two #40 review fixes (validate_encoding by trial encode/decode, no config key names in the unknown-key error). Result pending. |
