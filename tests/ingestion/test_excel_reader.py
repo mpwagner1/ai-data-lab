@@ -13,6 +13,7 @@ from ingestion.source_config import SourceConfig, parse_source_config
 
 RUN_AT = datetime(2026, 11, 12, 9, 0, 0, tzinfo=UTC)
 SECRET = "SECRETCELL"
+SHEET_SECRET = "SecretSheetName"
 
 
 @pytest.fixture
@@ -233,9 +234,53 @@ def test_truncated_and_protected_workbooks_fail_not_held(
     assert len(list((project / "lake" / "raw" / "demo").glob("receive_date=*/*"))) == 2
 
 
-def test_logs_have_no_cell_values(project: Path, caplog: pytest.LogCaptureFixture) -> None:
-    _workbook(_landing(project) / "w.xlsx", {"S": _table([("id",), (SECRET,)])})
+def test_logs_have_no_sheet_names_headers_or_cell_values(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    sheets = {
+        "First": _table([("id",), ("a",)]),
+        SHEET_SECRET: _table([("SecretHeader",), (SECRET,)]),
+    }
+    _workbook(_landing(project) / "w.xlsx", sheets)
     caplog.set_level(logging.INFO)
     assert main(["demo"]) == 0
-    assert "event=bronze_sheet" in caplog.text
-    assert SECRET not in caplog.text
+    assert 'event=bronze_sheet file_name="w.xlsx" sheet_index=2' in caplog.text
+    for text in (SHEET_SECRET, "SecretHeader", SECRET):
+        assert text not in caplog.text
+
+
+def test_failure_messages_have_no_sheet_names(tmp_path: Path) -> None:
+    path = _workbook(tmp_path / "w.xlsx", {SHEET_SECRET: _table([("id",)])})
+    with pytest.raises(ExcelReadError) as error:
+        read_workbook(path, SourceConfig(header_row=9), None)
+    assert SHEET_SECRET not in str(error.value)
+
+
+def test_large_float_is_written_out_in_full_library_behaviour(tmp_path: Path) -> None:
+    # Documents calamine/fastexcel behaviour, not a rule of ours: we must not reformat it.
+    path = _workbook(tmp_path / "w.xlsx", {"S": [(1, 1, "n"), (2, 1, 1.234567890123457e19)]})
+    assert _ingest(path, tmp_path)["n"].to_list() == ["12345678901234569216"]
+
+
+def test_leading_blank_columns_are_dropped_by_the_library(tmp_path: Path) -> None:
+    # Pins current behaviour: columns start at the first used one, so unnamed_<n> counts from it.
+    cells = [(1, 3, "id"), (1, 5, None), (2, 3, "a"), (2, 4, "b"), (2, 5, "c")]
+    frame = _ingest(_workbook(tmp_path / "w.xlsx", {"S": cells}), tmp_path)
+    assert frame.columns[:3] == ["id", "unnamed_2", "unnamed_3"]
+    assert frame["id"].to_list() == ["a"]
+
+
+def test_hidden_sheet_is_read(tmp_path: Path) -> None:
+    path = _two_sheets(tmp_path / "w.xlsx")
+    book = openpyxl.load_workbook(path)
+    book["Feb"].sheet_state = "hidden"
+    book.save(path)
+    assert set(_ingest(path, tmp_path)["_sheet_name"].to_list()) == {"Jan", "Feb"}
+
+
+def test_merged_range_fills_only_its_top_left_cell(tmp_path: Path) -> None:
+    path = _workbook(tmp_path / "w.xlsx", {"S": _table([("id", "n"), ("a", "m"), ("b", "k")])})
+    book = openpyxl.load_workbook(path)
+    book["S"].merge_cells("A2:A3")  # keeps only A2 ("a"); A3 is emptied by the merge
+    book.save(path)
+    assert _ingest(path, tmp_path)["id"].to_list() == ["a", None]
