@@ -243,8 +243,9 @@ every source column a string, no casting or cleaning, no row data in logs.
   top-level array; for NDJSON the position among the records (blank lines do not count); for
   Parquet the 1-based row position; for a workbook the row number as shown in the sheet, per
   sheet (see Header row); and for an archive member the numbering of the reader for the member's
-  own format, so every member starts again at its own first row. The contract file states the
-  same.
+  own format, so every member starts again at its own first row. `contracts/bronze/_metadata.yaml`
+  gives the same per-format meaning; it does not mention the blank-line detail for delimited files,
+  which comes from the code and its tests.
 
 ## Consequences
 
