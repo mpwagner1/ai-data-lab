@@ -24,7 +24,8 @@ from ingestion.archives import (
     ArchiveUnit,
     expand_archive,
 )
-from ingestion.detect import FileFormat, detect_format
+from ingestion.detect import FileFormat
+from ingestion.pending import file_outcome, log_pending
 from ingestion.source_config import SourceConfig
 
 logger = logging.getLogger(__name__)
@@ -124,14 +125,6 @@ def ingest_archive(
     return outcome
 
 
-def _member_reason(unit: ArchiveUnit, config: SourceConfig, delimiter: str | None) -> str:
-    try:
-        bronze._check_readable(unit.path, detect_format(unit.path, config), config, delimiter)
-    except bronze.FileHeld as held:
-        return held.reason
-    return bronze.REASON_READY
-
-
 def list_pending_members(
     path: Path,
     file_format: FileFormat,
@@ -143,7 +136,8 @@ def list_pending_members(
     """Log `bronze_pending` for each member with no bronze file yet; return how many. Read-only.
 
     Members are extracted to a private temporary directory outside the lake (and removed), so
-    nothing is written to the lake. An archive that cannot be read counts as one pending item with
+    nothing is written to the lake. Each member goes through the real read path (`pending.py`).
+    An archive that cannot be read counts as one pending item with
     `reason=archive_error` (it still has no bronze rows).
     """
     count = 0
@@ -155,14 +149,8 @@ def list_pending_members(
                 if bronze._already_ingested(source_dir, unit.file_hash):
                     continue
                 count += 1
-                bronze._log(
-                    "bronze_pending",
-                    source=source,
-                    file_name=path.name,
-                    member=unit.index,
-                    file_hash=unit.file_hash,
-                    reason=_member_reason(unit, config, delimiter),
-                )
+                outcome = file_outcome(unit.path, unit.file_hash, config, delimiter)
+                log_pending(source, path.name, unit.file_hash, outcome, member=unit.index)
     except ArchiveReadError:
         count += 1
         bronze._log(

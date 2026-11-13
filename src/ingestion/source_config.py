@@ -3,6 +3,7 @@
 Every key is optional. Unknown keys raise so a typo cannot be silently ignored.
 """
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,10 +69,10 @@ def validate_encoding(encoding: object) -> None:
     if not isinstance(encoding, str):
         raise ValueError("encoding must be a string")
     sample = "abc"
-    try:
+    ok = False
+    # The library message can echo the config value, so the raise happens outside the block.
+    with contextlib.suppress(LookupError, UnicodeError, TypeError, ValueError, AttributeError):
         ok = sample.encode(encoding).decode(encoding) == sample
-    except (LookupError, UnicodeError, TypeError, ValueError, AttributeError):
-        raise ValueError("encoding is not a usable text encoding") from None
     if not ok:
         raise ValueError("encoding is not a usable text encoding")
 
@@ -107,8 +108,11 @@ def load_source_config(source: str, config_root: Path = CONFIG_ROOT) -> SourceCo
     path = config_root / f"{source}.yaml"
     if not path.is_file():
         return SourceConfig()
+    problem = ""
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (yaml.YAMLError, UnicodeDecodeError) as error:
-        raise ValueError(f"invalid config file {path.name}: {type(error).__name__}") from None
+        problem = type(error).__name__  # the parser message can quote config text
+    if problem:
+        raise ValueError(f"invalid config file {path.name}: {problem}")
     return parse_source_config(raw)

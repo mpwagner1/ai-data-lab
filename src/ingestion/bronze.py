@@ -142,10 +142,13 @@ def _check_readable(
     if file_format is None or file_format not in READERS:
         raise FileHeld(REASON_NO_READER, f"no reader for {path.name}")
     if file_format is FileFormat.DELIMITED:
+        message = ""
         try:
             resolve_delimiter(path, config, flag)
         except MissingDelimiterError as error:
-            raise FileHeld(REASON_NEEDS_CONFIG, str(error)) from None
+            message = str(error)  # our own fixed text (file name only)
+        if message:
+            raise FileHeld(REASON_NEEDS_CONFIG, message)
     return file_format
 
 
@@ -162,11 +165,14 @@ def _load_with_metadata(
 
     Otherwise a file edited mid-read could leave `_file_hash` not matching the rows.
     """
+    undecodable = False
     try:
         parts = READERS[file_format](path, config, flag)
         frame = with_metadata(parts, file_name, file_hash, run_at)
     except UnicodeError:
-        raise FileHeld(REASON_ENCODING, f"cannot decode {path.name}") from None
+        undecodable = True  # the error object holds the raw bytes: raise outside the block
+    if undecodable:
+        raise FileHeld(REASON_ENCODING, f"cannot decode {path.name}")
     if hash_file(path) != file_hash:
         raise RuntimeError(f"file changed during ingestion: {path.name}")
     return frame
@@ -178,10 +184,14 @@ def _quote(value: object) -> str:
     return json.dumps(str(value))
 
 
+# Events that are not INFO: a failed file is an error, a held file is a warning.
+_EVENT_LEVELS = {"bronze_error": logging.ERROR, "bronze_unparsed": logging.WARNING}
+
+
 def _log(event: str, **fields: object) -> None:
     # json.dumps quotes values so spaces or newlines in a file name cannot break key=value.
     pairs = (f"{key}={_quote(value)}" for key, value in fields.items())
-    logger.info("%s", " ".join([f"event={event}", *pairs]))
+    logger.log(_EVENT_LEVELS.get(event, logging.INFO), "%s", " ".join([f"event={event}", *pairs]))
 
 
 def _elapsed(started: float) -> float:

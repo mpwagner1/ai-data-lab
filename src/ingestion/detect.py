@@ -39,7 +39,8 @@ def validate_format(name: str) -> FileFormat:
     try:
         return FileFormat(name)
     except ValueError:
-        raise ValueError("unknown `format` in source config") from None
+        pass  # the enum message echoes the value; raise outside the block
+    raise ValueError("unknown `format` in source config")
 
 
 _BROKEN_ZIP_BY_EXTENSION = {

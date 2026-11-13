@@ -47,11 +47,14 @@ def _fail(path: Path, problem: str) -> ExcelReadError:
 
 
 def _open(path: Path) -> fastexcel.ExcelReader:
+    problem = ""
     try:
         return fastexcel.read_excel(path)
     except Exception as error:
-        # The parser message can quote file content, so only its type is kept.
-        raise _fail(path, type(error).__name__) from None
+        # The parser message can quote file content, so only its type is kept, and the raise
+        # happens outside the block so `__context__` is empty too.
+        problem = type(error).__name__
+    raise _fail(path, problem)
 
 
 def _select_sheets(
@@ -66,12 +69,14 @@ def _select_sheets(
 
 def _load_rows(path: Path, book: fastexcel.ExcelReader, sheet: str) -> pl.DataFrame:
     """All rows of the sheet from sheet row 1, no header applied, every cell a string."""
+    problem = ""
     try:
         # header_row=None with skip_rows=0 keeps leading blank rows, so row i is sheet row i + 1.
         loaded = book.load_sheet(sheet, header_row=None, skip_rows=0, dtypes="string")
         return loaded.to_polars()
     except Exception as error:
-        raise _fail(path, type(error).__name__) from None
+        problem = type(error).__name__
+    raise _fail(path, problem)
 
 
 def _column_names(header: tuple[object, ...]) -> list[str]:
