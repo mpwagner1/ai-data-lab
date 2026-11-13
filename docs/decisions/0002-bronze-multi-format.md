@@ -76,7 +76,8 @@ every source column a string, no casting or cleaning, no row data in logs.
     and a workbook with no sheet that has cells fails.
   - **Failures.** A corrupt, truncated or password-protected workbook, a `sheets:` name that is
     not in the workbook, and a `header_row` past the end of a sheet fail that file (exit 1, raw copy
-    kept, the rest of the batch continues). They are not held. Messages and logs never carry
+    kept, the rest of the batch continues). They are not held. The error is `ExcelReadError`, a
+    `ValueError` like the other reader errors. Messages and logs never carry
     sheet names, headers or cell values; the per-sheet `bronze_sheet` log line carries the
     1-based sheet index, `header_row`, the skipped-row count and the row count.
   - **Detection.** A zip that is broken but has extension `.xlsx`, `.xlsm` or `.ods` is detected
@@ -131,7 +132,7 @@ every source column a string, no casting or cleaning, no row data in logs.
     type without a key-stringification rule. Maps inside structs, lists, arrays and other maps are
     rewritten recursively. The cost for silver is that looking a key up needs extra work and
     duplicate keys are kept.
-  - **Failures.** Reader errors (`JsonReadError`, `ParquetReadError`, both `ValueError`) name the
+  - **Failures.** Reader errors (`JsonReadError`, `ParquetReadError`, both `ValueError`, like `ExcelReadError` and `ArchiveReadError`) name the
     error type and file only, are raised outside the `except` block so `__context__` and
     `__cause__` are `None`, and never carry keys, values, record text or library messages. The
     file fails (exit 1, raw copy kept, the batch continues); it is not held.
@@ -175,8 +176,8 @@ every source column a string, no casting or cleaning, no row data in logs.
 - **Logs and errors.** Log lines are `key=value` with string values JSON-quoted. Levels: a failed
   file (`bronze_error`) logs at ERROR, a held file (`bronze_unparsed`) at WARNING, as do
   `bronze_stale_temp` and `bronze_no_files`; every other event is INFO, so an alert on ERROR sees
-  failed files and setup errors alike. Setup errors (a missing landing folder, a bad source name or
-  config) log only the error type and the source name, never the message, which can carry paths or
+  failed files and setup errors alike. Setup errors (a landing folder that is missing, cannot be
+  listed (permission denied) or is not a directory, a bad source name or config) exit 2 and log only the error type and the source name, never the message, which can carry paths or
   config text. Reader and config errors name the error type and file only and are raised outside the
   `except` block (the `_guarded` pattern), so `__context__` and `__cause__` are `None`; the library
   error, which can hold file bytes or config text (a `UnicodeError` holds the raw bytes), is never
@@ -236,7 +237,15 @@ every source column a string, no casting or cleaning, no row data in logs.
     `reason=archive_error` and counts toward exit 3.
 - **Metadata contract.** `_sheet_name` (string, the sheet a row came from, null for files that are not
   workbooks) is a fifth metadata column, added to `contracts/bronze/_metadata.yaml`. Older bronze files
-  read back with null `_sheet_name` via `union_by_name`, so no migration.
+  read back with null `_sheet_name` via `union_by_name`, so no migration. `_row_number` means: for
+  delimited files the 1-based position among data rows (the header is not counted; blank lines are
+  numbered rows with null values); for JSON the 1-based position among the elements of the
+  top-level array; for NDJSON the position among the records (blank lines do not count); for
+  Parquet the 1-based row position; for a workbook the row number as shown in the sheet, per
+  sheet (see Header row); and for an archive member the numbering of the reader for the member's
+  own format, so every member starts again at its own first row. `contracts/bronze/_metadata.yaml`
+  gives the same per-format meaning; it does not mention the blank-line detail for delimited files,
+  which comes from the code and its tests.
 
 ## Consequences
 
