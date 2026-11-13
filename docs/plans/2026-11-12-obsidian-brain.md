@@ -135,14 +135,17 @@ of the two vault-level index files. Anything else is reverted and logged.
 
 ## Decisions added while drafting task 1
 
-- The vault path is never written into any file: the audit commands use an `OBSIDIAN_VAULT` environment variable that Michael sets himself.
+- The vault path is never written into any file: the audit commands use an environment variable that Michael sets himself.
 - A change to a note whose status is `reviewed` sets it back to `draft` (the new text has not been reviewed).
 - Because Michael's global rule says to ask before running destructive commands, the audit reports an out-of-scope change and proposes the exact revert; it does not run the revert without asking.
 
 ## Progress
 
-- Task 0 done by Michael: the Local REST API server is registered as `obsidian` (plain-HTTP server on loopback, port 27123), `OBSIDIAN_VAULT` is set in `~/.zshenv`, the vault is a local-only git repository with `.obsidian/workspace*`, `.trash/` and the plugin's `data.json` ignored. Verified: no remote, clean tree, `data.json` untracked.
+- Task 0 done by Michael: the Obsidian server is registered at user scope and connected, the vault location is held in an environment variable, and the vault is a local-only git repository with the workspace files, the trash folder and the plugin's settings file ignored. Verified: no remote, clean tree, the plugin settings file untracked.
 - Task 1 done: the four user-level files were shown in full and approved on 2026-11-12. `brain-writer` has exactly five vault tools (`vault_list`, `vault_read`, `vault_get_document_map`, `vault_patch`, `vault_append`) so no tool can overwrite, move or delete a note or search the whole vault.
 - Task 2 done: the four files were written as approved (`~/.claude/CLAUDE.md` additive, 24 lines appended and the first 40 lines byte-identical; `~/.claude/agents/brain-writer.md`; `~/.claude/commands/writeup.md`; `~/.claude/commands/sync-brain.md`). Frontmatter parses; the sensitive-content scan of the four files is clean. Waiting for Michael to restart Claude Code so the agent and the commands load.
 - Still needed from Michael: the real scan terms (employer, client and internal project names), in chat, for task 12 only; never written to a file.
+- Task 5a done: four Architecture notes with Mermaid diagrams and the Architecture index (issue #95), audited read-only (allowed paths only, frontmatter and wikilink lint, GitHub links resolve to paths on `main`, Mermaid blocks present with a sentence each, sensitive scan clean) and accuracy-checked against the code and docs. Committed in the vault's local-only repository. Task 5b (Decisions) is running.
+- Scrubbed this plan of local setup details (an environment variable name, a port and a shell file name) that earlier progress notes had recorded; the plan is public and the vault must not echo such details.
+- Task 5b done after a repair: seven Decision notes (ADR 0001 and ADR 0002 in plain English, the pull-request workflow, Claude Pro only, narrow agent roles, the project brain, packaging) and the Decisions index; audited and accuracy-checked; committed in the vault. A lesson recorded for the agent file: vault file names must not contain a colon or similar characters, and a failed write must stop and report, never probe. Task 5 is done; next is task 6 (Components).
 
