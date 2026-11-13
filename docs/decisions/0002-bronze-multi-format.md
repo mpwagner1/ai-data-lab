@@ -3,7 +3,8 @@
 Date: 2026-11-12
 Status: Accepted (approved by Michael 2026-11-12, with the `_sheet_name` column and `--delimiter` flag).
 Amended 2026-11-12: `header_row` config key and sheet-row `_row_number` for workbooks, detection wording
-matched to the code, and archive handling (caps, failure rules, member safety) as built.
+matched to the code, archive handling (caps, failure rules, member safety), and the JSON, NDJSON, Parquet and
+UTF-16/32 encoding rules, all as built.
 
 ## Context
 
@@ -89,6 +90,81 @@ every source column a string, no casting or cleaning, no row data in logs.
   empty rows inside the data keep their numbers. This differs from delimited files, where
   `_row_number` is the 1-based position among data rows (the header is not counted). Both are
   documented in `contracts/bronze/_metadata.yaml`; bronze files already written are not changed.
+- **JSON, NDJSON and Parquet.** Registered readers for a top-level JSON array of objects, NDJSON (one
+  object per line) and Parquet. Every source column is `pl.String`.
+  - **JSON and NDJSON keep the source text of scalars.** Parsing uses `parse_float=str`,
+    `parse_int=str` and `parse_constant`, so `1.50`, `1e3`, `1E+3`, `-0`, a 24-digit integer, `NaN`
+    and `Infinity` arrive exactly as written. `true` and `false` arrive as `"true"` and `"false"`,
+    `null` and a missing key as null, strings as they are. Nested objects and arrays are encoded to
+    a compact JSON string by our own encoder (key order kept, no ASCII escaping, numbers inside
+    keep their source text), because `json.dumps` cannot keep number text. A `NaN` or `Infinity`
+    inside a nested value is written as a bare token, so that cell is not strict JSON; bronze
+    keeps what the source sent. Columns are the union of keys in first-seen order. A `_`-prefixed
+    key, an empty array or file, `[{}]`, a non-array top level, a non-object element or line, and a
+    trailing comma fail the file. Duplicate keys in one object: the last one wins. A UTF-8 BOM is
+    stripped. JSON is decoded with the source config `encoding` (default UTF-8); text that does not
+    decode is held as `encoding` like CSV, while a lone surrogate (valid JSON, not encodable) fails
+    the file. NDJSON is streamed line by line and blank lines are skipped. A single-line `.json`
+    file holding one object (`{"data":[...]}`) is detected as NDJSON and read as one row with the
+    nested value JSON-encoded; detection is not changed for it.
+  - **Parquet is the one source format with its own types**, so string conversion is a real
+    conversion, with the original file kept in the raw zone. The file is read eagerly. The forms
+    (Polars 2.1): integers as digits, booleans `true` and `false`, floats as the shortest round-trip
+    text (`1.0`, `0.1`, `1e+20`, `NaN`, `inf`), decimals as exact digits at the column scale
+    (`1.50`), dates `YYYY-MM-DD`, times `HH:MM:SS`, timestamps `YYYY-MM-DD HH:MM:SS.<fraction>`
+    with a fraction that follows the column's time unit (3, 6 or 9 digits) and an offset when the
+    column has a time zone, durations as ISO-8601 text (`PT1M30S`, `-P1D`), and binary as lowercase
+    hex. Structs, lists and arrays become compact JSON, where dates and decimals inside become JSON
+    strings and NaN and inf are bare tokens (not strict JSON). Binary nested inside a struct or
+    list fails the file. A `_`-prefixed column, a file with no columns, and a bronze Parquet fed
+    back in fail the file; a zero-row file with columns is written as a zero-row file.
+  - **Parquet MAP columns** become a JSON list of key and value pairs, for example
+    `[{"key":"a","value":"x"}]`, with an empty map as `[]` and a null map as null. The list form was
+    chosen over a JSON object because map keys need not be strings, so one form covers every key
+    type without a key-stringification rule. Maps inside structs, lists, arrays and other maps are
+    rewritten recursively. The cost for silver is that looking a key up needs extra work and
+    duplicate keys are kept.
+  - **Failures.** Reader errors (`JsonReadError`, `ParquetReadError`, both `ValueError`) name the
+    error type and file only, are raised outside the `except` block so `__context__` and
+    `__cause__` are `None`, and never carry keys, values, record text or library messages. The
+    file fails (exit 1, raw copy kept, the batch continues); it is not held.
+- **Text encodings and UTF-16/32.** The source config `encoding` is applied before detection, so
+  NUL bytes in UTF-16/32 text do not hide it. A file that could be loaded wrongly is held as
+  `encoding` (not written, exit 3, raw copy kept) rather than loaded as garbage, because a wrong
+  load is silent and permanent while a hold is visible in `bronze_unparsed` and `--pending`.
+  - **Plain `utf-16` and `utf-32` need a BOM.** The explicit-endian codecs (`utf-16-le`,
+    `utf-16-be`, `utf-32-le`, `utf-32-be`) do not. A UTF-8 BOM read with any codec other than
+    `utf-8-sig` is held. UTF-8 data read with a UTF-16/32 config holds (genuine multi-line
+    UTF-16/32 text always contains NUL bytes), and so does text whose decoded header contains
+    U+FFFD, a control character, or an unassigned, private-use or surrogate character.
+  - **The NUL rule is narrow.** A stray NUL inside otherwise valid UTF-8 loads unchanged at any
+    offset. A delimited file is held only when its NUL pattern looks like UTF-16/32 or strict UTF-8
+    decoding fails. A binary file named `.csv` that is not valid UTF-8 stays `no_reader`.
+  - **Byte order is decided by ASCII code units only** (`_wrong_byte_order`). An ASCII character
+    has exactly one non-zero byte, and which byte tells the order; other characters are ignored
+    because a correct CJK file contains characters that look swapped (U+4E00 and U+3000 read in the
+    other order are `N` and `0`). Structural ASCII (tab, newline, CR, comma, semicolon, pipe,
+    quote) votes first; only a sample with none falls back to structural plus letters and digits.
+    The opposite order must lose strictly, so **a tie holds**. Only the first 64 KB is looked at.
+  - **Held although correct** (a visible cost): a one-line file with no ASCII, a one-line file of
+    look-alike characters only, a file like `名前　都市　東京` (ideographic spaces and no
+    structural ASCII, letters or digits), a file whose votes tie, and a file whose first line is
+    over about 32K non-ASCII characters. **Can still load although wrong-endian** (the evidence is
+    ambiguous or outweighed): a one-line file made only of look-alike characters (`"一"` written
+    little-endian and read as big-endian gives the header `N`), and a file whose structural ASCII
+    is outvoted by look-alike structural characters such as U+2C00, U+0A00, U+7C00 or U+2200. In a
+    seeded differential test of about 3000 random texts, no wrong-endian file containing real
+    structural ASCII loaded unless such characters outvoted it.
+  - **Limits.** General mojibake (for example UTF-8 read as `cp1252`) cannot be detected from the
+    bytes, so it loads; it is the same for every single-byte encoding. The unassigned-character
+    rule follows Python's Unicode data (3.12 is Unicode 15.0), so a very new character in a UTF-16
+    header can cause a visible false hold.
+- **Symlinks.** Symlinks inside a landing folder are skipped and counted (`bronze_ignored
+  symlinks=K`, counts only), never followed, so nothing outside the landing folder can be copied
+  to the raw zone or parsed. The landing folder itself may be a symlink (for example to a mounted
+  share): that is an operator's explicit choice, so it is followed. The public `ingest_file`
+  called directly with a symlink path also follows it (the link name becomes `_file_name`). The two
+  followed cases are pinned by tests; refusing them would be a behavior change to decide first.
 - **Archives.** `.zip` and `.gz` are expanded (standard library `zipfile` and `gzip`, no new
   dependency). The archive itself is copied once, unchanged, to the raw zone (also when it later
   fails); members are not stored separately. Each member is its own unit: its own hash (SHA-256 of
