@@ -44,14 +44,18 @@ uv run pytest
 
 ## Bronze ingestion
 
-Put CSVs in `data/landing/<source>/`, then:
+Put files in `data/landing/<source>/` (CSV, TSV, pipe, TXT, Excel, ODS, JSON, NDJSON, Parquet,
+gzip or zip), then, from the project root:
 
 ```bash
-uv run python -m ingestion.bronze <source>           # skips files already loaded (by hash)
-uv run python -m ingestion.bronze <source> --force   # reload; adds a new file, keeps the old
+PYTHONPATH=src uv run python -m ingestion.bronze <source>              # load new files, skip loaded ones (by hash)
+PYTHONPATH=src uv run python -m ingestion.bronze <source> --pending    # list files not loaded yet, and why
+PYTHONPATH=src uv run python -m ingestion.bronze <source> --force      # reload; adds a new file, keeps the old
+PYTHONPATH=src uv run python -m ingestion.bronze <source> --delimiter '|'  # delimiter for .txt and .dat files
 ```
 
-Each load writes `lake/bronze/<source>/ingest_date=YYYY-MM-DD/<file_hash><run_ts>_<8 hex>.parquet`.
+Exit codes: 0 ok, 1 a file failed, 2 bad source, folder or config, 3 files held (see `--pending`).
+Each loaded file is written as `lake/bronze/<source>/ingest_date=YYYY-MM-DD/<file_hash><run_ts>_<8 hex>.parquet`.
 Read it back with DuckDB (missing columns come back null):
 
 ```python
@@ -61,5 +65,7 @@ from ingestion.bronze import read_bronze
 read_bronze("<source>", Path("lake")).show()
 ```
 
-How it works, the log events and exit codes: [docs/BRONZE.md](docs/BRONZE.md).
-Decision record: `docs/decisions/0001-bronze-parquet-storage.md`.
+Source config (`config/sources/<source>.yaml`), supported formats, held files, log events and how
+to add a reader: [docs/BRONZE.md](docs/BRONZE.md).
+Decision records: [0001 storage](docs/decisions/0001-bronze-parquet-storage.md) and
+[0002 formats](docs/decisions/0002-bronze-multi-format.md).
