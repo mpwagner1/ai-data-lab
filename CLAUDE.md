@@ -36,7 +36,7 @@ Brain folder: Projects/ai-data-lab/
 ## Project
 
 - Python 3.12 via uv, Polars, DuckDB, dbt-duckdb, Dagster, pytest.
-- Bronze is append-only; every row gets `_file_name`, `_ingested_at`, `_file_hash`, `_row_number`. No type casting in bronze.
+- Bronze is append-only; every row gets `_file_name`, `_ingested_at`, `_file_hash`, `_row_number`, `_sheet_name` (null except for workbooks). No type casting in bronze.
 - Silver tables must match their contract in `contracts/silver`.
 - Never log secrets or row-level data.
 
