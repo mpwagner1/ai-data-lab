@@ -1,7 +1,8 @@
 # 0001: Bronze storage as partitioned Parquet, queried with DuckDB
 
 Date: 2026-11-11
-Status: Proposed (revised 2026-11-11: unique file names, atomic writes, batch behavior, header-only files)
+Status: Accepted (revised 2026-11-11: unique file names, atomic writes, batch behavior, header-only files)
+Amended 2026-11-13: status changed from Proposed to Accepted on 2026-11-13. Bronze now has a fifth metadata column, `_sheet_name` (null except for workbooks), added by ADR 0002. The Context below describes the original four.
 
 ## Context
 
