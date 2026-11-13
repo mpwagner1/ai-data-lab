@@ -1,4 +1,5 @@
 import logging
+import traceback
 import zipfile
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time
@@ -358,3 +359,52 @@ def test_ods_date_and_number_cells_arrive_as_stored_not_as_shown(
     frame = _ingest(path, tmp_path)
 
     assert frame.select("d", "n").rows() == [("2026-01-02", "2.5")]
+
+
+def _corrupt(path: Path) -> Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("xl/workbook.xml", SECRET)
+    return path
+
+
+def _truncated(path: Path) -> Path:
+    whole = _two_sheets(path).read_bytes()
+    path.write_bytes(whole[: len(whole) // 2])
+    return path
+
+
+def _protected(path: Path) -> Path:
+    path.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 600)
+    return path
+
+
+def _plain(path: Path) -> Path:
+    return _workbook(path, {"S": _table([("id",), ("a",)])})
+
+
+def _duplicate(path: Path) -> Path:
+    return _workbook(path, {"S": [(1, 1, SECRET), (1, 2, SECRET), (2, 1, "x")]})
+
+
+@pytest.mark.parametrize(
+    ("make", "config"),
+    [
+        (_corrupt, SourceConfig()),
+        (_truncated, SourceConfig()),
+        (_protected, SourceConfig()),
+        (_plain, SourceConfig(sheets=(SECRET,))),
+        (_plain, SourceConfig(header_row=9)),
+        (_duplicate, SourceConfig()),
+    ],
+    ids=["corrupt", "truncated", "protected", "missing_sheet", "header_past_end", "duplicate"],
+)
+def test_excel_errors_carry_no_context_or_secret(
+    tmp_path: Path, make: Callable[[Path], Path], config: SourceConfig
+) -> None:
+    path = make(tmp_path / "w.xlsx")
+    with pytest.raises(ExcelReadError) as caught:
+        read_workbook(path, config, None)
+    exc = caught.value
+    assert exc.__context__ is None
+    assert exc.__cause__ is None
+    assert SECRET not in "".join(traceback.format_exception(exc))

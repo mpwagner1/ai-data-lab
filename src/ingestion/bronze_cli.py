@@ -13,6 +13,7 @@ from ingestion import bronze
 from ingestion.archive_ingest import ARCHIVE_FORMATS, list_pending_members
 from ingestion.detect import detect_format
 from ingestion.metadata import hash_file
+from ingestion.pending import file_outcome, log_pending
 from ingestion.raw_zone import landing_files
 from ingestion.source_config import validate_delimiter
 
@@ -28,7 +29,9 @@ def list_pending(
 ) -> int:
     """Log one `bronze_pending` line per landing file with no bronze rows yet. Writes nothing.
 
-    `reason` says why it is held, or `ready` if the next run can parse it. Returns the count.
+    `reason` says why it is held (`no_reader`, `needs_config`, `encoding`), `failed` (with the error
+    type) if a real run would fail it, or `ready` if it would load. Every file is parsed through the
+    real read path (see `pending.py`), so this costs as much memory as a run. Returns the count.
     """
     folder, config = bronze._prepare(source, landing_root, config_root)
     source_dir = bronze._source_dir(lake_root, source)
@@ -42,14 +45,8 @@ def list_pending(
         if bronze._already_ingested(source_dir, file_hash):
             continue
         count += 1
-        try:
-            bronze._check_readable(path, file_format, config, delimiter)
-            reason = bronze.REASON_READY
-        except bronze.FileHeld as held:
-            reason = held.reason
-        bronze._log(
-            "bronze_pending", source=source, file_name=path.name, file_hash=file_hash, reason=reason
-        )
+        outcome = file_outcome(path, file_hash, config, delimiter, file_format)
+        log_pending(source, path.name, file_hash, outcome)
     bronze._log("bronze_pending_run", source=source, pending=count)
     return count
 
@@ -102,7 +99,10 @@ def main(argv: list[str] | None = None) -> int:
             delimiter=args.delimiter,
         )
     except FileNotFoundError as error:
-        logger.error("event=bronze_error error=%s", json.dumps(str(error)))
+        # The message carries the landing path; log the type and source only.
+        logger.error(
+            "event=bronze_error error=%s source=%s", type(error).__name__, json.dumps(args.source)
+        )
         return 2
     except ValueError as error:
         # Config errors: log the type and source only, never the message (it may echo config).

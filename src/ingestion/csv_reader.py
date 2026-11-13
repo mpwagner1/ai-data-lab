@@ -182,12 +182,12 @@ def read_csv_as_strings(
     UTF-8 files are scanned lazily. Other encodings are decoded fully in memory first.
 
     Raises ValueError for an empty file or a source column starting with `_`, which would
-    collide with bronze metadata columns. Messages name columns, never values.
+    collide with bronze metadata columns. Messages carry no column names or values.
     """
     if _has_no_content(path):
         raise ValueError(f"empty file: {path.name}")
     frame = _scan(path, separator, encoding)
     reserved = [name for name in frame.collect_schema().names() if name.startswith("_")]
     if reserved:
-        raise ValueError(f"source columns start with '_': {reserved}")
+        raise ValueError("a source column starts with '_'")
     return frame

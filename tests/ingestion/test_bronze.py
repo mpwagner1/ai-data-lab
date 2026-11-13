@@ -285,7 +285,8 @@ def test_cli_missing_landing_folder_exits_nonzero(
 
     assert main(["typo"]) == 2
     assert "event=bronze_error" in caplog.text
-    assert "landing folder not found" in caplog.text
+    assert 'error=FileNotFoundError source="typo"' in caplog.text
+    assert "landing" not in caplog.text  # the path is not logged
 
 
 def test_cli_invalid_source_logs_error_and_exits_2(

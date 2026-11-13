@@ -42,9 +42,10 @@ def test_header_only_file_gives_zero_rows() -> None:
     assert frame.columns == ["id", "code", "amount"]
 
 
-def test_underscore_prefixed_column_is_rejected_by_name() -> None:
-    with pytest.raises(ValueError, match="_secret"):
+def test_underscore_prefixed_column_is_rejected_without_naming_it() -> None:
+    with pytest.raises(ValueError, match="a source column starts with '_'") as error:
         read_csv_as_strings(FIXTURES / "orders_underscore_column.csv")
+    assert "_secret" not in str(error.value)
 
 
 # Correct UTF-16 text whose characters have a zero low byte (U+4E00, U+AC00) must load.
