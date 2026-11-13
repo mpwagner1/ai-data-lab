@@ -45,16 +45,22 @@ uv run pytest
 ## Bronze ingestion
 
 Put files in `data/landing/<source>/` (CSV, TSV, pipe, TXT, Excel, ODS, JSON, NDJSON, Parquet,
-gzip or zip), then, from the project root:
+gzip or zip), then, from the project root (after `uv sync`):
 
 ```bash
-PYTHONPATH=src uv run python -m ingestion.bronze <source>              # load new files, skip loaded ones (by hash)
-PYTHONPATH=src uv run python -m ingestion.bronze <source> --pending    # list files not loaded yet, and why
-PYTHONPATH=src uv run python -m ingestion.bronze <source> --force      # reload; adds a new file, keeps the old
-PYTHONPATH=src uv run python -m ingestion.bronze <source> --delimiter '|'  # delimiter for .txt and .dat files
+uv run python -m ingestion.bronze <source>                  # load new files, skip loaded ones (by hash)
+uv run python -m ingestion.bronze <source> --pending        # list files not loaded yet, and why (writes nothing)
+uv run python -m ingestion.bronze <source> --force          # reload; adds a new file, keeps the old
+uv run python -m ingestion.bronze <source> --delimiter '|'  # delimiter for .txt and .dat files
 ```
 
-Exit codes: 0 ok, 1 a file failed, 2 bad source, folder or config, 3 files held (see `--pending`).
+Exit codes: 0 ok, 1 a file failed, 2 bad source, folder or config, 3 files held or pending (`--pending`
+exits 3 when it lists any file).
+
+A file that cannot be read yet (no delimiter for a `.txt`, no reader for the format, a wrong
+encoding) is kept in the raw zone and tried again on every run. `--pending` gives the reason for
+each file: `needs_config`, `no_reader`, `encoding`, `failed`, `ready`, `skipped` or `archive_error`.
+
 Each loaded file is written as `lake/bronze/<source>/ingest_date=YYYY-MM-DD/<file_hash><run_ts>_<8 hex>.parquet`.
 Read it back with DuckDB (missing columns come back null):
 
