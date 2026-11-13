@@ -1,10 +1,11 @@
 import codecs
+import itertools
 from pathlib import Path
 
 import polars as pl
 import pytest
 
-from ingestion.csv_reader import read_csv_as_strings
+from ingestion.csv_reader import _check_decoded, read_csv_as_strings
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -142,7 +143,7 @@ def test_many_zero_low_byte_chars_with_one_newline_load(
 def test_file_with_only_a_newline_as_ascii_is_decided(tmp_path: Path, encoding: str) -> None:
     other = "utf-16-be" if encoding == "utf-16-le" else "utf-16-le"
     path = tmp_path / "a.csv"
-    path.write_bytes("名前\n一二\n".replace(",", "").encode(encoding))
+    path.write_bytes("名前\n一二\n".encode(encoding))
 
     assert _read_rows(path, encoding) == [("一二",)]
     with pytest.raises(UnicodeError):
@@ -170,3 +171,50 @@ def test_bom_contradicting_the_codec_is_held(tmp_path: Path, written: str, bom: 
 
     with pytest.raises(UnicodeError):
         read_csv_as_strings(path, encoding=written)
+
+
+def _held(raw: bytes, encoding: str) -> bool:
+    try:
+        _check_decoded(raw, raw.decode(encoding), encoding)
+    except UnicodeError:
+        return True
+    return False
+
+
+_SWEEP_ALPHABET = ["a", ",", "\n", "\u4e00", "\u2c00", "\u0a00", "\u3000", "名", "가"]
+_SWEEP = ["".join(t) for k in (1, 2, 3) for t in itertools.product(_SWEEP_ALPHABET, repeat=k)]
+
+
+def _may_load_wrong_endian(text: str) -> bool:
+    """The documented undecidable class: a wrong-endian read of these may load."""
+    if not any(char in "a,\n" for char in text):
+        return True  # no ASCII at all
+    if any(char in "\u2c00\u0a00" for char in text):
+        return True  # look-alike comma/newline outvotes the real ones
+    no_structural = "," not in text and "\n" not in text
+    return no_structural and any(char in "\u4e00\u3000" for char in text)  # look-alike letters
+
+
+@pytest.mark.parametrize(("written", "read_as"), _ORDERS[:2])
+def test_short_string_sweep_wrong_endian_holds_and_correct_never_alters(
+    written: str, read_as: str
+) -> None:
+    """Wrong-endian reads hold except in `_may_load_wrong_endian`; correct reads never alter."""
+    loaded_wrong = []
+    for text in _SWEEP:
+        raw = text.encode(written)
+        if not _held(raw, written):
+            assert raw.decode(written) == text
+        if not _held(raw, read_as) and not _may_load_wrong_endian(text):
+            loaded_wrong.append(text)
+    assert loaded_wrong == []
+
+
+def test_ties_hold_wrong_endian_file() -> None:
+    assert _held("一a".encode("utf-16-le"), "utf-16-be")
+
+
+def test_control_code_units_do_not_vote_in_the_letter_fallback() -> None:
+    raw = "a\u0100\u0100".encode("utf-16-le")  # U+0100 read swapped is the control code 0x01
+
+    assert not _held(raw, "utf-16-le")

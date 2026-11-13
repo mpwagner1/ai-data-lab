@@ -62,13 +62,15 @@ def _is_garbage_char(char: str) -> bool:
 
 
 _STRUCTURAL = frozenset(b'\t\n\r,;|"')
+_TEXT = _STRUCTURAL | frozenset(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 
 
 def _ascii_votes(sample: bytes, size: int, big: bool) -> tuple[int, int, int, int]:
     """Count code units that read as ASCII in the declared order and in the opposite order.
 
-    Returns (right structural, wrong structural, right any, wrong any). "Structural" is tab,
-    newline, CR, comma, semicolon, pipe and quote. A unit is ASCII when its value is 1..127.
+    Returns (right structural, wrong structural, right text, wrong text). "Structural" is tab,
+    newline, CR, comma, semicolon, pipe and quote. "Text" is structural plus ASCII letters and
+    digits; other control codes and space do not vote.
     """
     right_order, wrong_order = ("big", "little") if big else ("little", "big")
     counts = Counter(sample[i : i + size] for i in range(0, len(sample), size))
@@ -76,7 +78,7 @@ def _ascii_votes(sample: bytes, size: int, big: bool) -> tuple[int, int, int, in
     for unit, number in counts.items():
         for offset, order in ((0, right_order), (1, wrong_order)):
             value = int.from_bytes(unit, order)
-            if not 0 < value < 0x80:
+            if value not in _TEXT:
                 continue
             votes[2 + offset] += number
             if value in _STRUCTURAL:
@@ -85,21 +87,32 @@ def _ascii_votes(sample: bytes, size: int, big: bool) -> tuple[int, int, int, in
 
 
 def _wrong_byte_order(sample: bytes, codec: str) -> bool:
-    """True if an explicit-endian UTF-16/32 sample looks written in the opposite byte order.
+    """True (hold) if an explicit-endian UTF-16/32 sample is not clearly in the declared order.
 
-    Only ASCII code units decide: an ASCII character has exactly one non-zero byte, and which
+    Only ASCII code units vote: an ASCII character has exactly one non-zero byte, and which
     byte it is tells the order. Other characters are ignored, because a correct file can hold
-    characters that look swapped (U+4E00 and U+3000 read in the other order are the ASCII
-    letter `N` and `0`). Structural ASCII (newline, comma, quote, ...) votes first, since text
-    does not contain those by accident; only a sample with none falls back to all ASCII units
-    (letters, digits, space). Held (True) when the opposite order has more votes, and also
-    when the sample has no ASCII code unit at all (undecidable).
+    characters that look swapped (U+4E00 and U+3000 read in the other order are `N` and `0`).
+    Structural ASCII (tab, newline, CR, comma, semicolon, pipe, quote) votes first; only a
+    sample with none falls back to structural plus letters and digits (space and other control
+    codes never vote). The opposite order must lose strictly: a tie holds. Only the first
+    64 KB is looked at (see `_check_decoded`).
 
-    Undecidable wrong-endian cases, all held and never loaded: a sample with no ASCII code
-    unit, such as a one-line file of only CJK, Hangul or emoji; a one-line file made only of
-    characters that look like ASCII when swapped (U+4E00 only). A wrong-endian file whose
-    structural ASCII is outweighed by characters like U+0A00 or U+2C00 cannot be told apart
-    from correct text and loads (a visibly garbled header is still held by the header check).
+    HELD as `encoding` (never loaded), visible through exit 3 and `--pending`:
+    - wrong-endian files whose ASCII votes favour or tie the opposite order, including every
+      wrong-endian file with ordinary ASCII text, header-only files with no newline too;
+    - correct files with no ASCII code unit at all (a one-line CJK, Hangul or emoji file);
+    - correct one-line files made only of look-alike characters (U+4E00 and the like);
+    - correct files like `名前　都市　東京` (ideographic spaces, no digits, no structural ASCII);
+    - correct files whose votes tie;
+    - correct files whose first line is over about 32K non-ASCII characters, because the
+      vote only sees the first 64 KB.
+
+    CAN STILL LOAD wrong-endian (the bytes are ambiguous or the evidence is outweighed):
+    - a one-line file made only of look-alike characters, for example `"一"` written
+      little-endian and read as big-endian loads as header `N`;
+    - a file whose structural ASCII is outweighed by look-alike structural characters such as
+      U+2C00 (comma), U+0A00 (newline), U+7C00 (pipe) or U+2200 (quote); a garbled header is
+      still caught by the header check when the character is unassigned or a control.
     """
     size = 2 if codec.startswith("utf-16") else 4
     sample = sample[: len(sample) - len(sample) % size]
@@ -107,10 +120,10 @@ def _wrong_byte_order(sample: bytes, codec: str) -> bool:
         return False
     right_s, wrong_s, right_any, wrong_any = _ascii_votes(sample, size, codec.endswith("-be"))
     if right_s + wrong_s:
-        return wrong_s > right_s
+        return wrong_s >= right_s
     if right_any + wrong_any == 0:
         return True
-    return wrong_any > right_any
+    return wrong_any >= right_any
 
 
 def _check_decoded(raw: bytes, text: str, encoding: str) -> None:
