@@ -145,4 +145,6 @@ of the two vault-level index files. Anything else is reverted and logged.
 - Task 1 done: the four user-level files were shown in full and approved on 2026-11-12. `brain-writer` has exactly five vault tools (`vault_list`, `vault_read`, `vault_get_document_map`, `vault_patch`, `vault_append`) so no tool can overwrite, move or delete a note or search the whole vault.
 - Task 2 done: the four files were written as approved (`~/.claude/CLAUDE.md` additive, 24 lines appended and the first 40 lines byte-identical; `~/.claude/agents/brain-writer.md`; `~/.claude/commands/writeup.md`; `~/.claude/commands/sync-brain.md`). Frontmatter parses; the sensitive-content scan of the four files is clean. Waiting for Michael to restart Claude Code so the agent and the commands load.
 - Still needed from Michael: the real scan terms (employer, client and internal project names), in chat, for task 12 only; never written to a file.
+- Task 3 done: PR #93 (CLAUDE.md only, additions only: the Routing table and `Brain folder: Projects/ai-data-lab/`); the diff was read and matches the approved text. Open for Michael to merge.
+- Task 4 done: `brain-writer` created the 26-note skeleton (issue #94); audited read-only and committed in the vault's local-only repository. Next: tasks 5 to 8 (the backfill), which need PR #93 merged so the commands can find the Brain folder.
 
