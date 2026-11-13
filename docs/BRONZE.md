@@ -222,7 +222,7 @@ A run and `--pending` give each file one reason. Both use the same read path
 | `no_reader` | The format is not read yet: a binary file, a nested archive, `.tar`, fixed-width text, or a file with no recognised signature | held: `bronze_unparsed` | `bronze_pending reason=no_reader` |
 | `encoding` | The text does not decode with the config `encoding`, or it looks like UTF-16/32 with the wrong byte order or a stray BOM (section 6) | held: `bronze_unparsed` | `bronze_pending reason=encoding` |
 | `failed` | The file would fail: empty or corrupt content, invalid JSON, a bad workbook, an exceeded cap, or a file that cannot be read at all (for example no read permission) | failed: `bronze_error` (ERROR), exit 1 | `bronze_pending reason=failed error=<type>`; no `file_hash` if the file cannot be hashed |
-| `archive_error` | The archive itself cannot be read (corrupt, encrypted, unsupported compression, over a cap) | failed: `bronze_error error=ArchiveReadError`, exit 1 | one line for the archive, `reason=archive_error`, no hash |
+| `archive_error` | The archive itself cannot be read (corrupt, encrypted, unsupported compression, over a cap) | failed: `bronze_error error=ArchiveReadError`, exit 1 | one `reason=archive_error` line for the archive, no hash. Members listed before a failure found mid-stream (a bad CRC, for example) stay listed |
 | `ready` | The reader and config are there and the read succeeded, so a run writes it | written: `bronze_write` | `bronze_pending reason=ready` |
 | `skipped` | Same bytes as an earlier `ready` file in the same `--pending` list (the first copy in run order is the one that loads) | `bronze_skip` for the later copy | `bronze_pending reason=skipped` |
 
