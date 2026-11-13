@@ -7,8 +7,9 @@ Because the code is shared, `--pending` and a real run cannot disagree on a file
 Cost: every pending file is parsed in full and held in memory while it is checked, so `--pending`
 is as heavy as a real run minus the write. Nothing is written under the lake or raw zone.
 
-Outcomes: `ready` (a run would load it), a held reason (`no_reader`, `needs_config`, `encoding`)
-or `failed` with the error type only (never a message, which can hold file content).
+Outcomes: `ready` (a run would load it), a held reason (`no_reader`, `needs_config`, `encoding`),
+`skipped` (identical content to an earlier file in the same call, which a real run skips) or
+`failed` with the error type only (never a message, which can hold file content).
 """
 
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from ingestion.detect import FileFormat, detect_format
 from ingestion.source_config import SourceConfig
 
 REASON_FAILED = "failed"
+REASON_SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -56,10 +58,40 @@ def file_outcome(
     return Outcome(bronze.REASON_READY)
 
 
-def log_pending(source: str, name: str, file_hash: str, outcome: Outcome, **extra: object) -> None:
-    """Write one `bronze_pending` line (the `error` key only when the file would fail)."""
+def outcome_once(
+    seen: dict[str, Outcome],
+    path: Path,
+    file_hash: str,
+    config: SourceConfig,
+    delimiter: str | None,
+    file_format: FileFormat | None = None,
+) -> Outcome:
+    """Like `file_outcome`, but a hash already in `seen` is not read again.
+
+    A real run writes the first file with a given hash and skips later copies. So a later copy of a
+    `ready` file is `skipped`; a later copy of a held or failed file gets the same reason, since a
+    real run would hold or fail it too. `seen` is shared by landing files and archive members.
+    """
+    first = seen.get(file_hash)
+    if first is None:
+        first = seen[file_hash] = file_outcome(path, file_hash, config, delimiter, file_format)
+        return first
+    return Outcome(REASON_SKIPPED) if first.reason == bronze.REASON_READY else first
+
+
+def log_pending(
+    source: str, name: str, file_hash: str | None, outcome: Outcome, **extra: object
+) -> None:
+    """Write one `bronze_pending` line (`error` only when the file would fail, `file_hash` only
+    when it could be computed).
+
+    `reason` is `ready`, a held reason, `skipped` (a copy of an earlier file), `failed` or
+    `archive_error`.
+    """
     fields: dict[str, object] = {"source": source, "file_name": name, **extra}
-    fields.update(file_hash=file_hash, reason=outcome.reason)
+    if file_hash is not None:
+        fields["file_hash"] = file_hash
+    fields["reason"] = outcome.reason
     if outcome.error is not None:
         fields["error"] = outcome.error
     bronze._log("bronze_pending", **fields)
