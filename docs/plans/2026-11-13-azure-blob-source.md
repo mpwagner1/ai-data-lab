@@ -31,8 +31,14 @@ Blob container/<prefix>  --stage-->  data/landing/<source>/  --bronze-->  lake/r
   <source> <prefix>`. It lists the blobs directly under the prefix, downloads each into the
   landing folder, and exits. It never writes, deletes or renames anything in Blob.
 - Settings come from environment variables only: `AZURE_STORAGE_ACCOUNT` and
-  `AZURE_STORAGE_CONTAINER`. `.env.example` holds placeholders. No account, container or
-  subscription name is written in the repo, docs, logs or the Obsidian notes.
+  `AZURE_STORAGE_CONTAINER`. The owner keeps the values in 1Password. The git-ignored `.env`
+  holds `op://` references and the command runs as `op run --env-file=.env -- uv run python -m
+  ingestion.azure_stage ...`, so the values exist only in that process (the pattern in
+  `docs/SECURITY.md`). `.env.example` holds placeholder references such as
+  `op://<vault>/<item>/<field>`, never real ones. The code never calls 1Password itself and
+  never needs a secret: the account and container names are configuration, and access comes from
+  `az login`. No account, container, subscription or 1Password name is written in the repo, docs,
+  logs or the Obsidian notes (the brain's rules also forbid secret references).
 - Blob names are untrusted data, like archive member names. Only blobs directly under the prefix
   (no recursion). A name is rejected if it has a path separator beyond the prefix, `..`, a
   control character, or is empty. Folder marker blobs (zero bytes with a trailing slash, which
@@ -52,13 +58,13 @@ Blob container/<prefix>  --stage-->  data/landing/<source>/  --bronze-->  lake/r
 
 | # | Task | Agent | Model | Acceptance |
 | --- | --- | --- | --- | --- |
-| 0 | Owner sets up the account side: create a container for test files, give the owner's user the `Storage Blob Data Reader` role on that container only, run `az login`, and put the two environment variables in a git-ignored `.env`. Agents never change roles or create Azure resources. | Owner | n/a | `az storage blob list` works against the test container with `--auth-mode login`, and a write attempt is refused. |
+| 0 | Owner sets up the account side: create a container for test files, give the owner's user the `Storage Blob Data Reader` role on that container only, run `az login`, and store the account name and container name in 1Password, then put two `op://` references in a git-ignored `.env`. Agents never change roles, read 1Password items directly or create Azure resources. | Owner | n/a | `op run --env-file=.env -- az storage blob list` works against the test container with `--auth-mode login`, and a write attempt is refused. |
 | 1 | Write ADR 0003 (Azure Blob as a source, staging approach, auth, what is not built) and ask the owner to approve it. | Alfred | Opus | ADR committed on a branch; owner approves before task 2. |
 | 2 | Implement `azure_stage.py`, its CLI, `.env.example` and the dependencies. | builder | Sonnet | Behaviour in the Design section; ruff, format and pytest pass; no network in tests. |
 | 3 | Tests with a fake blob client: listing and prefix rules, rejected names, folder markers, caps, collision and identical-skip, exit codes, and that no log line contains a token, URL query or blob content. | qa | Sonnet | New tests fail when the code is broken (mutation check); all checks pass. |
 | 4 | Review the diff, with a security focus (path safety, secret handling, read-only use). | code-reviewer | Sonnet | Comments only; blocking findings fixed before merge. |
 | 5 | Update docs: a short Azure section in `docs/BRONZE.md`, a line in `docs/SECURITY.md` about the read-only role, README quick start. Placeholders only. | docs-writer | Haiku | Docs match the code; no real names. |
-| 6 | Smoke test with synthetic files: the owner uploads a few made-up test files to the container; Alfred runs stage, then bronze, then `--pending`, using the owner's session after the owner says go. | Alfred + owner | Opus | Files land in bronze with correct metadata; a second run skips them; a failed login exits 2 with no secret printed. |
+| 6 | Smoke test with synthetic files: the owner uploads a few made-up test files to the container; Alfred runs stage, then bronze, then `--pending`, using the owner's `az login` session and `op run` after the owner says go (1Password will ask the owner to approve the access). | Alfred + owner | Opus | Files land in bronze with correct metadata; a second run skips them; a failed login exits 2 with no secret printed. |
 | 7 | `/sync-brain` so the vault notes describe the new source; Azure area note updated (it currently says there is no Azure code). | brain-writer | Sonnet | Audit clean; no account, container or subscription names in any note. |
 
 Each code task: one issue, one branch `agent/<issue>-<slug>`, one PR; the owner merges.
