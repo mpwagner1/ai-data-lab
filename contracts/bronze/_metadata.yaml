@@ -16,6 +16,11 @@ columns:
       Delimited files: 1-based position among data rows (the header is not counted).
       Workbooks: the row number as shown in the sheet (first data row is header_row + 1,
       so 2 with header_row 1), counted per sheet, empty rows inside the data keep their numbers.
+      JSON files: 1-based position among the records (the elements of the top-level array).
+      NDJSON files: 1-based position among the records; blank lines are skipped and do not count.
+      Parquet files: 1-based row position in the file.
+      Archive members (zip and gzip): numbered by the reader for the member's own format, as if it
+      were a landing file of that format, so every member starts again at its own first row.
   - name: _sheet_name
     type: string
     description: Sheet a row came from; null for files that are not workbooks (and in older bronze files)

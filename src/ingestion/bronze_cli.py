@@ -125,9 +125,11 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force,
             delimiter=args.delimiter,
         )
-    except (FileNotFoundError, ValueError) as error:
-        # A missing folder's message carries the landing path and a config error's may echo config;
-        # log the type and source only.
+    except (OSError, ValueError) as error:
+        # OSError covers a missing, unlistable or non-directory landing folder (FileNotFoundError,
+        # PermissionError, NotADirectoryError...). Its message carries the landing path and a
+        # config error's may echo config; log the type and source only. Per-file errors never
+        # get here: every file is guarded by its own `except Exception` (see bronze.py).
         logger.error(
             "event=bronze_error error=%s source=%s", type(error).__name__, json.dumps(args.source)
         )
