@@ -27,15 +27,18 @@ source sent, plus enough metadata to trace every row back to its file.
 | `_row_number` | int | Row position, counted per file (per sheet for workbooks). See below |
 | `_sheet_name` | string | The sheet a row came from. Null for files that are not workbooks |
 
-`_row_number` means different things by format, so read the column with its format in mind:
+`_row_number` means different things by format, so read the column with its format in mind (the
+same rules as [`contracts/bronze/_metadata.yaml`](../contracts/bronze/_metadata.yaml)):
 
-- **Delimited text, JSON, NDJSON, Parquet:** 1-based position among data rows. The header is not
-  counted. NDJSON blank lines are skipped and not counted.
+- **Delimited text:** 1-based position among data rows. The header is not counted.
+- **JSON:** 1-based position among the elements of the top-level array.
+- **NDJSON:** 1-based position among the records. Blank lines are skipped and do not count.
+- **Parquet:** 1-based row position in the file.
 - **Workbooks:** the row number as Excel shows it. With `header_row: 1` the first data row is 2;
-  with `header_row: 6` it is 7. Each sheet has its own numbering, and empty rows inside the data
+  with `header_row: 6` it is 7. Each sheet is numbered on its own, and empty rows inside the data
   keep their numbers, so a person can open the original file and find the row.
-- **Archive members:** each member is its own file, so its numbering starts again at 1 (or at
-  the sheet row for a workbook member).
+- **Archive members:** the reader numbers each member as if it were a landing file of its own
+  format, so every member starts again at its own first row.
 
 Why these columns: `_file_hash` lets silver see a file that was loaded twice, and `_file_name`
 plus `_row_number` point back to the exact row in the source.
@@ -244,8 +247,9 @@ listed, as `failed` with its error type and no `file_hash`, and the other files 
 
 Exit 3 if any item is listed, whatever its reason, since `ready` and `skipped` files are not loaded
 yet; exit 0 if the list is empty. A failed file is listed, not failed, so `--pending` does not exit 1
-for it. The one exception is a landing folder that cannot be listed (for example no read permission
-on the folder): that error is not caught, Python prints a traceback and exits 1. A run does the same.
+for it. A landing folder that cannot be listed (for example no read permission on the folder) or is
+not a directory is a setup error, as it is for a run: one `bronze_error` line and exit 2, with no
+`bronze_pending` lines.
 
 ### Failures
 
@@ -262,7 +266,7 @@ list wins:
 
 | Code | Meaning |
 | --- | --- |
-| 2 | Setup error, before any file is processed: invalid source name, invalid `--delimiter`, missing landing folder, invalid config (unknown key, bad value, unknown `format`, unreadable YAML) |
+| 2 | Setup error, before any file is processed: invalid source name, invalid `--delimiter`, landing folder missing, not a directory or not listable, invalid config (unknown key, bad value, unknown `format`, unreadable YAML) |
 | 1 | At least one file failed (a held file does not change this) |
 | 3 | No file failed, but some files are held or pending. With `--pending`, any listed item |
 | 0 | Every file was loaded or skipped, or the landing folder has no loadable files (a `bronze_no_files` warning is logged) |
@@ -280,7 +284,7 @@ are WARNING; every other event is INFO.
 | `bronze_skip` | `source`, `file_name`, `file_hash`, `duration_s` | Already loaded; not read |
 | `bronze_write` | `source`, `file_name`, `file_hash`, `rows_ingested`, `duration_s` | A bronze file was written |
 | `bronze_unparsed` | `source`, `file_name`, `file_hash`, `reason` | Held this run (`needs_config`, `no_reader`, `encoding`) |
-| `bronze_error` | `source`, `file_name`, `error` (exception type) | A file failed. A setup error (exit 2) has no `file_name`; it logs `source` and `error` only, and an invalid `--delimiter` logs `error` only |
+| `bronze_error` | `source`, `file_name`, `error` (exception type) | A file failed. A setup error (exit 2) has no `file_name`; it logs `source` and `error` only, the same for a missing, unlistable or non-directory landing folder (a path that is a file logs `FileNotFoundError`). An invalid `--delimiter` logs `error` only |
 | `bronze_run` | `source`, `files`, `written`, `skipped`, `pending`, `failed` | Summary of a run. `files` counts landing files; members are in the counts |
 | `bronze_no_files` | `source` | The landing folder has no loadable files |
 | `bronze_ignored` | landing: `source`, `symlinks`; archive: `source`, `file_name`, `members`, `symlinks` | Counts of skipped entries. Names of skipped entries are not logged. `members` counts every skipped entry in the archive, directories and symlinks included |
@@ -400,8 +404,7 @@ Rules a reader must follow:
 - Reject a source column whose name starts with `_`. `with_metadata` does not check for it, so
   the source value would be silently replaced by the metadata column.
 - Raise a `ValueError` subclass whose message names the error type and the file name only. Never
-  put keys, values, cell text, record text or library messages in it. (`ExcelReadError` is a plain
-  `Exception`; the run catches both.)
+  put keys, values, cell text, record text or library messages in it.
 - Raise outside any `except` block, so that `__context__` and `__cause__` are `None`. A library
   exception can hold file content. `json_reader.py` and `archives.py` show the pattern: catch,
   keep only the type name, then raise after the block.
