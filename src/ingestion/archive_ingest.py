@@ -25,7 +25,7 @@ from ingestion.archives import (
     expand_archive,
 )
 from ingestion.detect import FileFormat
-from ingestion.pending import file_outcome, log_pending
+from ingestion.pending import REASON_FAILED, Outcome, log_pending, outcome_once
 from ingestion.source_config import SourceConfig
 
 logger = logging.getLogger(__name__)
@@ -132,15 +132,18 @@ def list_pending_members(
     source_dir: Path,
     config: SourceConfig,
     delimiter: str | None,
+    seen: dict[str, Outcome],
 ) -> int:
     """Log `bronze_pending` for each member with no bronze file yet; return how many. Read-only.
 
     Members are extracted to a private temporary directory outside the lake (and removed), so
-    nothing is written to the lake. Each member goes through the real read path (`pending.py`).
-    An archive that cannot be read counts as one pending item with
-    `reason=archive_error` (it still has no bronze rows).
+    nothing is written to the lake. Each member goes through the real read path (`pending.py`);
+    `seen` (hash to outcome, shared with the landing files) marks copies as `skipped`.
+    An archive that cannot be read counts as one pending item with `reason=archive_error`; any
+    other error opening it is `failed` with the type only (it still has no bronze rows).
     """
     count = 0
+    problem = ""
     counts = ArchiveCounts()
     units = expand_archive(path, file_format is FileFormat.GZIP, counts)
     try:
@@ -149,12 +152,17 @@ def list_pending_members(
                 if bronze._already_ingested(source_dir, unit.file_hash):
                     continue
                 count += 1
-                outcome = file_outcome(unit.path, unit.file_hash, config, delimiter)
+                outcome = outcome_once(seen, unit.path, unit.file_hash, config, delimiter)
                 log_pending(source, path.name, unit.file_hash, outcome, member=unit.index)
     except ArchiveReadError:
         count += 1
         bronze._log(
             "bronze_pending", source=source, file_name=path.name, reason=REASON_ARCHIVE_ERROR
         )
+    except Exception as error:  # noqa: BLE001 - reported by type, like a real run's bronze_error
+        problem = type(error).__name__
+    if problem:
+        count += 1
+        log_pending(source, path.name, None, Outcome(REASON_FAILED, problem))
     _log_ignored(source, path, counts)
     return count

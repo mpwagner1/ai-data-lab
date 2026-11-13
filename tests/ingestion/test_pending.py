@@ -2,6 +2,7 @@
 
 import io
 import logging
+import os
 import re
 import tempfile
 import zipfile
@@ -101,6 +102,21 @@ CASES: dict[str, Case] = {
         None,
     ),
     "broken_archive": ({"a.zip": b"PK\x03\x04" + b"\x00" * 40}, None),
+    "identical_files": ({"a.csv": b"id\n1\n", "b.csv": b"id\n1\n"}, None),
+    "identical_held_files": ({"a.bin": b"\x00\x01", "b.bin": b"\x00\x01"}, None),
+    "identical_failed_files": ({"a.json": b'{"x": ', "b.json": b'{"x": '}, None),
+    "zip_member_copy_of_earlier_file": (
+        {"a.csv": b"id\n1\n", "b.zip": _zip({"x.csv": b"id\n1\n", "y.csv": b"id\n2\n"})},
+        None,
+    ),
+    "landing_file_copy_of_earlier_member": (
+        {"a.zip": _zip({"x.csv": b"id\n1\n"}), "b.csv": b"id\n1\n"},
+        None,
+    ),
+    "identical_members_in_one_zip": (
+        {"a.zip": _zip({"x.csv": b"id\n1\n", "y.csv": b"id\n1\n"})},
+        None,
+    ),
 }
 
 
@@ -115,6 +131,8 @@ def _outcomes(text: str) -> list[str]:
             found.append(reason[1] + (f":{error[1]}" if error else ""))
         elif "event=bronze_write" in line:
             found.append("ready")
+        elif "event=bronze_skip" in line:
+            found.append("skipped")
         elif "event=bronze_error" in line:
             assert error
             found.append(
@@ -247,3 +265,127 @@ def test_archive_member_failure_logs_at_error(
     }
     assert by_event["bronze_error"] == logging.ERROR
     assert by_event["bronze_unparsed"] == logging.WARNING
+
+
+def _reason_lines(text: str) -> dict[str, str]:
+    """`file_name` -> reason for each `bronze_pending` line."""
+    return {
+        m[0]: m[1]
+        for m in re.findall(
+            r'event=bronze_pending source="demo" file_name="([^"]+)".*?reason="(\w+)"', text
+        )
+    }
+
+
+def test_pending_marks_a_later_identical_file_skipped_and_still_exits_3(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    for name in ("a.csv", "b.csv"):
+        (_landing(project) / name).write_bytes(b"id\n1\n")
+    caplog.set_level(logging.INFO)
+
+    assert main(["demo", "--pending"]) == 3
+    assert _reason_lines(caplog.text) == {"a.csv": "ready", "b.csv": "skipped"}
+    assert "pending=2" in caplog.text
+    caplog.clear()
+
+    main(["demo"])
+    assert caplog.text.count("event=bronze_write") == 1
+    assert caplog.text.count("event=bronze_skip") == 1
+    assert len(list((project / "lake").rglob("*.parquet"))) == 1
+
+
+def test_pending_member_copy_of_a_landing_file_is_skipped(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    for name, data in CASES["zip_member_copy_of_earlier_file"][0].items():
+        (_landing(project) / name).write_bytes(data)
+    caplog.set_level(logging.INFO)
+
+    main(["demo", "--pending"])
+
+    assert _outcomes(caplog.text) == ["ready", "ready", "skipped"]
+    assert re.findall(r'file_name="b.zip" member=(\d) .*?reason="(\w+)"', caplog.text) == [
+        ("1", "skipped"),
+        ("2", "ready"),
+    ]
+
+
+def test_pending_failed_first_copy_gives_the_same_failure(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    for name in ("a.json", "b.json"):
+        (_landing(project) / name).write_bytes(b'{"x": ')
+    caplog.set_level(logging.INFO)
+
+    main(["demo", "--pending"])
+
+    assert _outcomes(caplog.text) == ["failed:JsonReadError"] * 2
+
+
+@pytest.fixture
+def locked_file(project: Path) -> Path:
+    if os.name != "posix" or os.geteuid() == 0:
+        pytest.skip("chmod 000 does not deny reads on this platform or as root")
+    path = _landing(project) / "locked.csv"
+    path.write_bytes(b"id\n2\n")
+    path.chmod(0)
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("chmod 000 does not deny reads here")
+        yield path
+    finally:
+        path.chmod(0o644)
+
+
+def test_pending_reports_an_unreadable_file_and_lists_the_rest(
+    project: Path, locked_file: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (_landing(project) / "ok.csv").write_bytes(b"id\n1\n")
+    caplog.set_level(logging.INFO)
+
+    assert main(["demo", "--pending"]) == 3
+
+    lines = [r for r in caplog.text.splitlines() if "event=bronze_pending " in r]
+    locked = next(line for line in lines if "locked.csv" in line)
+    assert 'reason="failed"' in locked
+    assert 'error="PermissionError"' in locked
+    assert "file_hash" not in locked
+    assert _reason_lines(caplog.text) == {"locked.csv": "failed", "ok.csv": "ready"}
+    assert str(project) not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "pending=2" in caplog.text
+
+
+def test_unreadable_file_agrees_with_the_real_run(
+    project: Path, locked_file: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (_landing(project) / "ok.csv").write_bytes(b"id\n1\n")
+    caplog.set_level(logging.INFO)
+
+    main(["demo", "--pending"])
+    predicted = _outcomes(caplog.text)
+    caplog.clear()
+    assert main(["demo"]) == 1
+    actual = _outcomes(caplog.text)
+
+    assert predicted == actual == ["failed:PermissionError", "ready"]
+    assert len(list((project / "lake").rglob("*.parquet"))) == 1
+
+
+def test_pending_unreadable_archive_never_tracebacks(
+    project: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    (_landing(project) / "a.zip").write_bytes(_zip({"x.csv": b"id\n1\n"}))
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError(f"{SECRET} /some/path")
+
+    monkeypatch.setattr("ingestion.archive_ingest.expand_archive", boom)
+    caplog.set_level(logging.INFO)
+
+    assert main(["demo", "--pending"]) == 3
+
+    assert _outcomes(caplog.text) == ["failed:OSError"]
+    assert SECRET not in caplog.text
+    assert "/some/path" not in caplog.text
