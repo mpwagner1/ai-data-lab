@@ -20,7 +20,7 @@
 ## What to test
 
 - Every module gets tests, and every bug fix gets a regression test.
-- Bronze: the four metadata columns exist, values are never cast, reruns append.
+- Bronze: the five metadata columns exist, values are never cast, reruns append.
 - Silver: output schema equals its contract in `contracts/silver`; bad rows are
   quarantined with a reason.
 - Gold: dbt tests in the schema YAML (`unique`, `not_null`, `relationships`).
