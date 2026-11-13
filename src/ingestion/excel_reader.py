@@ -38,7 +38,7 @@ from ingestion.source_config import SourceConfig
 logger = logging.getLogger(__name__)
 
 
-class ExcelReadError(Exception):
+class ExcelReadError(ValueError):
     """A workbook cannot be read (corrupt, truncated, password-protected or misconfigured)."""
 
 
