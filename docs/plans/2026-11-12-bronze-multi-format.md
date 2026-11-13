@@ -1,7 +1,11 @@
 # Plan: Bronze ingestion for any file a customer sends
 
 Date: 2026-11-12
-Status: In progress. Michael approved the ADR on 2026-11-12; issues for tasks 1-7 are created after this PR merges.
+Status: Done 2026-11-12 (all seven tasks merged). Delivered by PRs #36 (task 1), #42 (2), #49 (3),
+#55 (4), #58 (5), #64 (6) and #74 (7), with follow-ups #40, #46, #53, #67, #70 and #77. Reviews changed
+the design along the way; ADR 0002 describes the behavior as built, and `docs/BRONZE.md` is the guide.
+Left over, by choice: a one-test follow-up for the structural-vote tie in the UTF-16 byte-order check
+(PR #70 review), and an optional `landing.py` split of `bronze.py` (430 lines, limit 450).
 
 ## Goal
 
