@@ -5,19 +5,35 @@ Medallion layers: bronze (raw) → silver (typed, contracted) → gold (modeled 
 ## Bronze
 
 - Append-only. Never update or delete rows; reruns append new rows.
-- Every row carries these metadata columns:
+- Every row carries these five metadata columns (defined in
+  [`contracts/bronze/_metadata.yaml`](../contracts/bronze/_metadata.yaml)):
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `_file_name` | string | Source file name (not full path) |
-| `_ingested_at` | timestamp (UTC) | When this load wrote the row |
-| `_file_hash` | string | SHA-256 of the source file bytes |
-| `_row_number` | int | 1-based row position within the source file |
+| `_file_name` | string | Landing file name (not full path). An archive member is `<archive>!<member>`, for example `orders.zip!orders_2026.csv` |
+| `_ingested_at` | timestamp (UTC) | When the run started; the same for every file in one run |
+| `_file_hash` | string | SHA-256 of the file bytes (of the member's bytes for an archive member) |
+| `_row_number` | int | Row position; its meaning depends on the format (below) |
+| `_sheet_name` | string | The workbook sheet a row came from; null for files that are not workbooks |
 
-- No type casting in bronze. Source columns stay as strings exactly as read.
-  Read CSVs with Polars `infer_schema=False` (or DuckDB `all_varchar=true`).
-- No cleaning, renaming of values, or filtering. Fix problems in silver.
-- Idempotency: `_file_hash` lets silver detect a file loaded more than once.
+- `_row_number` by format:
+  - Delimited text, JSON, NDJSON and Parquet: 1-based position among data rows. The header is not
+    counted.
+  - Workbooks: the row number as Excel shows it, counted per sheet. With `header_row: 1` the first
+    data row is 2. Empty rows inside the data keep their numbers.
+  - Archive members: each member is its own file, so the numbering starts again (at 1, or at the
+    sheet row for a workbook member).
+- Source columns are all strings and keep the source text. Bronze does not cast, trim, round,
+  rename values or filter rows; typing happens in silver. Parquet is the one format with its own
+  types, so its values are written as text in fixed forms (see [BRONZE](BRONZE.md), section 4). A
+  source column whose name starts with `_` fails the file, so it cannot clash with a metadata column.
+- The raw zone keeps every received file unchanged, so bronze can be rebuilt from it.
+- A file that cannot be read yet is held, not dropped: nothing is written for it, and it is read
+  again on every run, so a new reader or config replays it. A corrupt file fails the run instead.
+- Idempotency: a file whose `_file_hash` is already in bronze is skipped. A forced reload writes its
+  rows again, so `_file_hash` lets silver detect and dedupe a file loaded more than once.
+- Details (formats, config, exit codes, log events): [BRONZE](BRONZE.md). Why: ADR
+  [0002](decisions/0002-bronze-multi-format.md).
 
 ## Silver
 

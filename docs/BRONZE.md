@@ -61,7 +61,9 @@ extension (a dot and 1 to 10 letters or digits), otherwise none. The copy is has
 the same bytes were received before (any day, any name) no second copy is made.
 
 **Skip check.** A file counts as already loaded when a bronze file name starts with its hash. Such
-files are skipped before they are read (`bronze_skip`), so a changed config does not re-read them.
+files are skipped before any reader runs (`bronze_skip`), so a changed config does not re-parse
+them. An archive is the exception: it is expanded again on a rerun so that each member's hash can
+be checked (section 4).
 
 **Parse and write.** The format is detected (section 4) and the file is read into strings, with
 metadata added and the result collected in memory. The source is hashed again; if it changed during
@@ -81,7 +83,8 @@ next run skips it instead of reading it again.
 
 **Pending.** A raw file is pending when no bronze file name starts with its hash. There is no
 manifest, so every run tries every pending file: adding a reader or a config key replays held files
-with no extra command. A failed file is pending too and is tried again next run.
+with no extra command. A failed file is pending too and is tried again next run. `--pending` lists
+them (section 5).
 
 **Reruns and `--force`.** A rerun over the same folder writes nothing and logs `bronze_skip` for
 each loaded file. `--force` skips the skip check, so a loaded file is written again as a new bronze
@@ -90,16 +93,16 @@ The raw zone is not copied again.
 
 ## 3. How to run it
 
-Run from the project root. The paths `data/landing`, `lake` and `config/sources` are relative to
-the current directory. The `ingestion` package lives in `src/`, so set `PYTHONPATH=src` (the
-project does not install the package; see section 8).
+Run from the project root. `uv sync` installs the project, including the `ingestion` package from
+`src/` (section 8), so `uv run python -m ingestion.bronze` needs no other setup. The paths
+`data/landing`, `lake` and `config/sources` are relative to the current directory.
 
 ```bash
 mkdir -p data/landing/<source>        # put the files here (git-ignored)
-PYTHONPATH=src uv run python -m ingestion.bronze <source>                # load new files
-PYTHONPATH=src uv run python -m ingestion.bronze <source> --pending      # list what is not loaded, and why
-PYTHONPATH=src uv run python -m ingestion.bronze <source> --force        # load again; keeps the earlier copy
-PYTHONPATH=src uv run python -m ingestion.bronze <source> --delimiter '|'  # for .txt and .dat files
+uv run python -m ingestion.bronze <source>                  # load new files
+uv run python -m ingestion.bronze <source> --pending        # list what is not loaded, and why
+uv run python -m ingestion.bronze <source> --force          # load again; keeps the earlier copy
+uv run python -m ingestion.bronze <source> --delimiter '|'  # for .txt and .dat files
 ```
 
 `<source>` is a name you choose, for example `orders`. It must start with a letter or digit and
@@ -107,7 +110,7 @@ use only letters, digits, `_` and `-`, because it becomes a folder name. Any oth
 
 | Flag | What it does |
 | --- | --- |
-| `--pending` | Lists landing files with no bronze rows yet, one `bronze_pending` line each, and the reason (section 5). Writes nothing. Exits 3 if any file is listed, else 0. `--force` has no effect with it |
+| `--pending` | Lists every landing file, and each archive member, with no bronze rows yet, with its outcome (section 5). Reads each one the way a run does and writes nothing. Exits 3 if any item is listed, else 0. `--force` has no effect with it |
 | `--force` | Ignores the skip check and loads every file again (section 2) |
 | `--delimiter X` | One character, the delimiter for `.txt` and `.dat` files. Beats the source config `delimiter`, but only for those two extensions: a `.csv`, `.tsv` or `.psv` keeps its own delimiter. Must be exactly one byte in UTF-8 and not a quote or a line break, otherwise the run exits 2 (`error=InvalidDelimiter`). For a tab, pass a real tab (`$'\t'` in zsh or bash), not the two characters `\t`. The flag is not stored, so a later run without it holds the file again |
 
@@ -201,30 +204,58 @@ held; a member with corrupt content fails; the other members still load.
 - If `format:` is set in config it replaces detection, so an archive is read as that format
   instead of being expanded.
 
-## 5. Held, failed and exit codes
+## 5. Held, failed, pending and exit codes
 
-A file is **held** when it is kept but cannot be parsed yet. Nothing is written for it, it stays
+A file is **held** when it is kept but cannot be read yet. Nothing is written for it, it stays
 pending, and the run exits 3 if nothing failed. A file **fails** when reading it raises an error.
 Nothing is written, the raw copy is kept, the rest of the batch continues, and the run exits 1.
-Failed files are retried on every run.
+Failed files are tried again on every run, as are held ones.
 
-| `reason` | Logged as | What it means | What to do next |
+### Reasons
+
+A run and `--pending` give each file one reason. Both use the same read path
+([`src/ingestion/pending.py`](../src/ingestion/pending.py) and `bronze.py`), so they cannot disagree.
+
+| `reason` | What it means | In a run | With `--pending` |
 | --- | --- | --- | --- |
-| `needs_config` | `bronze_unparsed` in a run; `bronze_pending` with `--pending` | A `.txt` or `.dat` file with no delimiter from `--delimiter` or config | Set `delimiter` in `config/sources/<source>.yaml`, or pass `--delimiter`, then run again |
-| `no_reader` | same | The format is not read yet: a binary file, a nested archive, `.tar`, or a file with no recognised signature | Check the file. If it is a real format bronze should read, a reader is needed (section 9). Fixed-width needs a spec first |
-| `encoding` | `bronze_unparsed` in a run only | The text does not decode with the config `encoding`, or it looks like UTF-16/32 or has a wrong byte order or a stray BOM (section 6) | Set the right `encoding` (for example `cp1252` or `utf-16`), then run again |
-| `archive_error` | `bronze_pending` with `--pending` only | The archive cannot be read (corrupt, truncated, encrypted, unsupported, over a cap). Counted as pending | Replace or fix the archive. A run marks it as failed with `error=ArchiveReadError` |
-| `ready` | `bronze_pending` with `--pending` only | The reader and config are there, so the next run will try the file | Nothing. `ready` does not mean it will load: a corrupt file or an encoding problem also shows `ready` until a run reads it |
+| `needs_config` | A `.txt` or `.dat` file with no delimiter from `--delimiter` or config | held: `bronze_unparsed` (WARNING) | `bronze_pending reason=needs_config` |
+| `no_reader` | The format is not read yet: a binary file, a nested archive, `.tar`, fixed-width text, or a file with no recognised signature | held: `bronze_unparsed` | `bronze_pending reason=no_reader` |
+| `encoding` | The text does not decode with the config `encoding`, or it looks like UTF-16/32 with the wrong byte order or a stray BOM (section 6) | held: `bronze_unparsed` | `bronze_pending reason=encoding` |
+| `failed` | The file would fail: empty or corrupt content, invalid JSON, a bad workbook, an exceeded cap, or a file that cannot be read at all (for example no read permission) | failed: `bronze_error` (ERROR), exit 1 | `bronze_pending reason=failed error=<type>`; no `file_hash` if the file cannot be hashed |
+| `archive_error` | The archive itself cannot be read (corrupt, encrypted, unsupported compression, over a cap) | failed: `bronze_error error=ArchiveReadError`, exit 1 | one `reason=archive_error` line for the archive, no hash. Members listed before a failure found mid-stream (a bad CRC, for example) stay listed |
+| `ready` | The reader and config are there and the read succeeded, so a run writes it | written: `bronze_write` | `bronze_pending reason=ready` |
+| `skipped` | Same bytes as an earlier `ready` file in the same `--pending` list (the first copy in run order is the one that loads) | `bronze_skip` for the later copy | `bronze_pending reason=skipped` |
 
-`--pending` does not parse files, so it cannot report `encoding` or a corrupt file. Only a run
-does (for example `bronze_unparsed reason=encoding` or `bronze_error error=ExcelReadError`).
+A copy of a file that is held or failed gets the same reason as the first copy, since a run would
+hold or fail it the same way.
+
+### `--pending`
+
+`--pending` lists every landing file, and each archive member, that has no bronze rows yet, one
+`bronze_pending` line each. It reads each file the way a run does (detect, read, add metadata) and
+then drops the result, so it costs about as much time and memory as a run, minus the write. It
+writes nothing: no raw copy and no bronze file. Archive members are extracted to a temporary folder
+outside the lake and removed afterwards.
+
+Use it before a rerun. A reader or config change turns `needs_config` and `no_reader` into `ready`,
+and `ready` means a run reads the file and writes it (a later copy with the same bytes is `skipped`).
+A file that cannot be read at all is still
+listed, as `failed` with its error type and no `file_hash`, and the other files are still checked.
+
+Exit 3 if any item is listed, whatever its reason, since `ready` and `skipped` files are not loaded
+yet; exit 0 if the list is empty. A failed file is listed, not failed, so `--pending` does not exit 1
+for it. The one exception is a landing folder that cannot be listed (for example no read permission
+on the folder): that error is not caught, Python prints a traceback and exits 1. A run does the same.
+
+### Failures
 
 Failures (exit 1), logged as `bronze_error ... error=<type>`: for example an empty or whitespace-only
 file (`ValueError`), a corrupt or password-protected workbook (`ExcelReadError`), invalid JSON
 (`JsonReadError`), an unreadable Parquet file (`ParquetReadError`), an archive error or cap
-(`ArchiveReadError`), a file that changed during the read (`RuntimeError`). A `sheets:` name not in
-the workbook, or a `header_row` past the end of a sheet, also fails the file. A failed member fails
-only that member; members already written stay.
+(`ArchiveReadError`), a file that changed during the read (`RuntimeError`), a file that cannot be
+read at all (for example `PermissionError`). A `sheets:` name not in the workbook, or a `header_row`
+past the end of a sheet, also fails the file. A failed member fails only that member; members
+already written stay.
 
 Exit codes (from `src/ingestion/bronze_cli.py`). When more than one applies, the first one in the
 list wins:
@@ -233,17 +264,15 @@ list wins:
 | --- | --- |
 | 2 | Setup error, before any file is processed: invalid source name, invalid `--delimiter`, missing landing folder, invalid config (unknown key, bad value, unknown `format`, unreadable YAML) |
 | 1 | At least one file failed (a held file does not change this) |
-| 3 | No file failed, but some files are held or pending. With `--pending`, any listed file |
+| 3 | No file failed, but some files are held or pending. With `--pending`, any listed item |
 | 0 | Every file was loaded or skipped, or the landing folder has no loadable files (a `bronze_no_files` warning is logged) |
-
-`--pending` never exits 1: it does not parse files. Its exits are 2 (setup error) and 3 (any file
-listed) or 0.
 
 ### Log events
 
 Logs are `key=value` lines on stderr. String values are JSON-quoted, so a file name with a space
-or a newline cannot break the format. Most events are INFO, including a file-level `bronze_error`
-(setup errors are ERROR; `bronze_stale_temp` and `bronze_no_files` are WARNING).
+or a newline cannot break the format. Levels: `bronze_error` is ERROR, so one alert covers a failed
+file and a setup error; `bronze_unparsed` (a held file), `bronze_stale_temp` and `bronze_no_files`
+are WARNING; every other event is INFO.
 
 | Event | Keys | Meaning |
 | --- | --- | --- |
@@ -251,20 +280,21 @@ or a newline cannot break the format. Most events are INFO, including a file-lev
 | `bronze_skip` | `source`, `file_name`, `file_hash`, `duration_s` | Already loaded; not read |
 | `bronze_write` | `source`, `file_name`, `file_hash`, `rows_ingested`, `duration_s` | A bronze file was written |
 | `bronze_unparsed` | `source`, `file_name`, `file_hash`, `reason` | Held this run (`needs_config`, `no_reader`, `encoding`) |
-| `bronze_error` | `source`, `file_name`, `error` (exception type) | A file failed. Setup errors have no `file_name` and log `error` and `source` only |
+| `bronze_error` | `source`, `file_name`, `error` (exception type) | A file failed. A setup error (exit 2) has no `file_name`; it logs `source` and `error` only, and an invalid `--delimiter` logs `error` only |
 | `bronze_run` | `source`, `files`, `written`, `skipped`, `pending`, `failed` | Summary of a run. `files` counts landing files; members are in the counts |
-| `bronze_no_files` | `source` | Warning: the landing folder has no loadable files |
-| `bronze_ignored` | `source`, `symlinks` (landing); `source`, `file_name`, `members`, `symlinks` (archive) | Counts of skipped entries. Names are not logged |
+| `bronze_no_files` | `source` | The landing folder has no loadable files |
+| `bronze_ignored` | landing: `source`, `symlinks`; archive: `source`, `file_name`, `members`, `symlinks` | Counts of skipped entries. Names of skipped entries are not logged. `members` counts every skipped entry in the archive, directories and symlinks included |
 | `bronze_sheet` | `file_name`, `sheet_index`, `header_row`, `skipped_rows`, `rows` | One workbook sheet read. The sheet index, never its name. For an archive member the file name is the generated temp name |
-| `bronze_stale_temp` | `source`, `count`, `files` | Warning: leftover bronze `.parquet.tmp` files. Reported, never deleted |
-| `bronze_pending` | `source`, `file_name`, `file_hash`, `reason` (`ready`, `needs_config`, `no_reader`); archive members add `member` (index) and use the archive name; `archive_error` has no hash | One line per pending file with `--pending` |
+| `bronze_stale_temp` | `source`, `count`, `files` | Leftover bronze `.parquet.tmp` files. Reported, never deleted |
+| `bronze_pending` | `source`, `file_name`, `reason`, `file_hash` (when it can be computed), `error` (for `failed` only), `member` (archive members only: the 1-based index) | One line per item listed by `--pending`. For an archive, `file_name` is the archive name |
 | `bronze_pending_run` | `source`, `pending` | Summary of `--pending` |
 
 Archive members are logged as `<archive>!#<index>` (the 1-based index in the archive) with their
 hash, so a member name never reaches a log. Bronze logs counts, file names, hashes, durations and
 error types. It never logs row contents, cell values, config text, sheet names, member names, or
-exception messages (a message can carry a value). One exception: the missing-folder error logs
-its message, which holds the path `data/landing/<source>` and nothing from the file.
+exception messages (a message can carry a value). A setup error logs the exception type and the
+source name only, never its message: the missing-folder message holds the landing path, and a
+config message can echo config text.
 
 ## 6. Encodings
 
@@ -309,12 +339,14 @@ its message, which holds the path `data/landing/<source>` and nothing from the f
   Azure SDK). That is not built.
 - **A forced reload duplicates that file's rows by design.** Silver dedupes on `_file_hash`.
 - **Memory.** Every file is collected in memory before it is written, for every format, so a
-  file's size is limited by RAM. Only archives have caps. A QA run measured a 40 MB UTF-8 CSV at a
-  peak of about 270 MB (see [`plans/log.md`](plans/log.md), #33).
+  file's size is limited by RAM. `--pending` holds each file the same way (section 5). Only archives
+  have caps. A QA run measured a 40 MB UTF-8 CSV at a peak of about 270 MB (see
+  [`plans/log.md`](plans/log.md), #33).
 - **Many small files.** One Parquet file per load and one raw copy per distinct file. Compaction
   would be a separate job that must not alter bronze history.
-- **Install.** `ingestion` is not an installed package, so the CLI and snippets need `PYTHONPATH=src`.
-  Pytest finds it through `pythonpath` in `pyproject.toml`.
+- **Install.** `uv sync` installs the project, including the `ingestion` package from `src/` (the
+  `[build-system]` and wheel package settings in `pyproject.toml`), so the CLI and the snippets run
+  with `uv run` and no path setup. Pytest reads `src` through `pythonpath` in `pyproject.toml`.
 
 ## 9. Code map and adding a reader
 
@@ -322,6 +354,7 @@ its message, which holds the path `data/landing/<source>` and nothing from the f
 | --- | --- |
 | `src/ingestion/bronze.py` | Write path: receive, detect, read, metadata, atomic write, skip check, run loop, `read_bronze`. Holds `READERS` and `FileHeld` |
 | `src/ingestion/bronze_cli.py` | Command line: flags, `--pending` listing, exit codes |
+| `src/ingestion/pending.py` | The outcome of one file without a write (`ready`, held reasons, `failed`, `skipped`), shared with the run |
 | `src/ingestion/raw_zone.py` | Raw zone copy (`receive_raw`), the no-replace `publish` helper, the landing folder scan |
 | `src/ingestion/detect.py` | `FileFormat`, `detect_format` (config, signature, text rules), `validate_format` |
 | `src/ingestion/source_config.py` | `SourceConfig`, `load_source_config`, validation of every config key |
@@ -367,7 +400,8 @@ Rules a reader must follow:
 - Reject a source column whose name starts with `_`. `with_metadata` does not check for it, so
   the source value would be silently replaced by the metadata column.
 - Raise a `ValueError` subclass whose message names the error type and the file name only. Never
-  put keys, values, cell text, record text or library messages in it.
+  put keys, values, cell text, record text or library messages in it. (`ExcelReadError` is a plain
+  `Exception`; the run catches both.)
 - Raise outside any `except` block, so that `__context__` and `__cause__` are `None`. A library
   exception can hold file content. `json_reader.py` and `archives.py` show the pattern: catch,
   keep only the type name, then raise after the block.
@@ -397,6 +431,10 @@ Review changed the design several times. Some examples:
   file. Review of PR #67 found it, and PR #70 made a tie hold. Section 6 and ADR 0002 have the cases.
 - **Config and YAML errors** are logged by exception type only, and tests check that no config
   text reaches the output.
+- **Late CLI reviews** (PR #77, and the hardening in PR #81). `--pending` was first a separate
+  check; it now runs the real read path, so it cannot disagree with a run. Packaging lets `uv sync`
+  install the project, so the old path workaround is gone. Failures log at ERROR, held files at
+  WARNING, and setup errors log the type and source only.
 
 Details of each change are in [`plans/log.md`](plans/log.md).
 
