@@ -3,8 +3,8 @@
 Date: 2026-11-12
 Status: Accepted (approved by Michael 2026-11-12, with the `_sheet_name` column and `--delimiter` flag).
 Amended 2026-11-12: `header_row` config key and sheet-row `_row_number` for workbooks, detection wording
-matched to the code, archive handling (caps, failure rules, member safety), and the JSON, NDJSON, Parquet and
-UTF-16/32 encoding rules, all as built.
+matched to the code, archive handling (caps, failure rules, member safety), the JSON, NDJSON, Parquet and
+UTF-16/32 encoding rules, and the final CLI behavior (real `--pending`, log levels, error text), all as built.
 
 ## Context
 
@@ -22,8 +22,15 @@ every source column a string, no casting or cleaning, no row data in logs.
   ADR 0001 skip check). There is no manifest. Every run parses all pending files, so adding a reader or
   config replays held files with no extra command.
 - **Held, not rejected.** A file with no reader, missing config or an unknown encoding stays pending and
-  logs `bronze_unparsed` with a `reason`. The run exits 3 when nothing failed but files are held. A
-  `--pending` flag lists them.
+  logs `bronze_unparsed` with a `reason` (at WARNING). The run exits 3 when nothing failed but files
+  are held. A `--pending` flag lists every file that has no bronze rows yet, with the outcome a real
+  run would give. It runs the same read path as a real run (detect, the readable check, then the
+  reader and the metadata step) and discards the frame, so the two cannot disagree: `needs_config`,
+  `no_reader` or `encoding` for a file a run would hold, `failed` with the error type only for a file
+  a run would fail (corrupt content, a bad header, an exceeded cap), and `ready` for a file that would
+  load. A `ready` file still counts as not loaded, so `--pending` exits 3 when there is anything to
+  load. The cost is that `--pending` parses every pending file, about as long as a real run. It writes
+  nothing.
 - **Reader registry.** `READERS: dict[FileFormat, Reader]`. A reader takes a path and a `SourceConfig`
   and returns `list[ParsedPart]`, each with an optional sheet name and an all-string `LazyFrame`.
   Metadata, hashing, the re-hash check, the atomic write and logging are shared.
@@ -104,7 +111,7 @@ every source column a string, no casting or cleaning, no row data in logs.
     trailing comma fail the file. Duplicate keys in one object: the last one wins. A UTF-8 BOM is
     stripped. JSON is decoded with the source config `encoding` (default UTF-8); text that does not
     decode is held as `encoding` like CSV, while a lone surrogate (valid JSON, not encodable) fails
-    the file. NDJSON is streamed line by line and blank lines are skipped. A single-line `.json`
+    the file. NDJSON is parsed line by line (the file is not read into one string) and blank lines are skipped; the rows are all kept in memory like every format. A single-line `.json`
     file holding one object (`{"data":[...]}`) is detected as NDJSON and read as one row with the
     nested value JSON-encoded; detection is not changed for it.
   - **Parquet is the one source format with its own types**, so string conversion is a real
@@ -160,11 +167,21 @@ every source column a string, no casting or cleaning, no row data in logs.
     rule follows Python's Unicode data (3.12 is Unicode 15.0), so a very new character in a UTF-16
     header can cause a visible false hold.
 - **Symlinks.** Symlinks inside a landing folder are skipped and counted (`bronze_ignored
-  symlinks=K`, counts only), never followed, so nothing outside the landing folder can be copied
+  source=<source> symlinks=K`, counts only), never followed, so nothing outside the landing folder can be copied
   to the raw zone or parsed. The landing folder itself may be a symlink (for example to a mounted
   share): that is an operator's explicit choice, so it is followed. The public `ingest_file`
   called directly with a symlink path also follows it (the link name becomes `_file_name`). The two
   followed cases are pinned by tests; refusing them would be a behavior change to decide first.
+- **Logs and errors.** Log lines are `key=value` with string values JSON-quoted. Levels: a failed
+  file (`bronze_error`) logs at ERROR, a held file (`bronze_unparsed`) at WARNING, as do
+  `bronze_stale_temp` and `bronze_no_files`; every other event is INFO, so an alert on ERROR sees
+  failed files and setup errors alike. Setup errors (a missing landing folder, a bad source name or
+  config) log only the error type and the source name, never the message, which can carry paths or
+  config text. Reader and config errors name the error type and file only and are raised outside the
+  `except` block (the `_guarded` pattern), so `__context__` and `__cause__` are `None`; the library
+  error, which can hold file bytes or config text (a `UnicodeError` holds the raw bytes), is never
+  attached. The same holds for the encoding hold and for config validation. The `_`-prefixed column
+  error has a fixed text with no column names.
 - **Archives.** `.zip` and `.gz` are expanded (standard library `zipfile` and `gzip`, no new
   dependency). The archive itself is copied once, unchanged, to the raw zone (also when it later
   fails); members are not stored separately. Each member is its own unit: its own hash (SHA-256 of
@@ -179,8 +196,10 @@ every source column a string, no casting or cleaning, no row data in logs.
     paths, backslashes, drive letters, UNC paths, NULs, very long names and control characters
     cannot escape. Names never appear in logs or exception messages: logs use `<archive>!#<index>`
     and the member hash. Directory entries, names starting with `.` or `~$`, `__MACOSX/` entries
-    and symlink entries are skipped and counted in one line, `bronze_ignored members=N symlinks=K`
-    (counts only, written only when N is above 0).
+    and symlink entries are skipped and counted in one line per archive, `bronze_ignored
+    source=<source> file_name=<archive> members=N symlinks=K` (counts only; `members` counts every
+    skipped entry, directories and symlinks included; written only when N is above 0). The archive
+    file name is the landing file's own name, not a member name.
   - **Caps** (module constants, no config keys): `MAX_MEMBERS = 100` per archive,
     `MAX_TOTAL_UNCOMPRESSED_BYTES = 512 MiB` per archive, `MAX_MEMBER_BYTES = 256 MiB` per member.
     They are enforced on the bytes actually decompressed while streaming, not on the sizes in the
@@ -211,8 +230,10 @@ every source column a string, no casting or cleaning, no row data in logs.
     whose members are all ingested, because the skip is per member hash and needs the member
     bytes; the caps bound the cost.
   - **`--pending`** expands archives too, read-only: it extracts to a temp directory outside the
-    lake, writes nothing, and lists pending members by archive name and member index. A broken
-    archive is listed as one pending item with `reason=archive_error` and counts toward exit 3.
+    lake, writes nothing, and lists pending members by archive name and member index. Each
+    member gets the same real-run outcome as a file (`ready`, `needs_config`, `no_reader`,
+    `encoding` or `failed`). A broken archive is listed as one pending item with
+    `reason=archive_error` and counts toward exit 3.
 - **Metadata contract.** `_sheet_name` (string, the sheet a row came from, null for files that are not
   workbooks) is a fifth metadata column, added to `contracts/bronze/_metadata.yaml`. Older bronze files
   read back with null `_sheet_name` via `union_by_name`, so no migration.
@@ -226,9 +247,13 @@ every source column a string, no casting or cleaning, no row data in logs.
 - The raw zone roughly doubles storage.
 - Excel stores `001` as the number 1, so the leading zeros are already gone in the file. Numbers come
   back in calamine's string form (for example `1.0`). The raw zone keeps the original bytes.
-- Excel, JSON arrays and Parquet are read into memory, not streamed (NDJSON and CSV are streamed).
-  Archive members are streamed to disk under the caps above, but each member is then read by its
-  own reader.
+- Every file is collected into one in-memory frame before the write (the metadata step collects each
+  part, then the parts are stacked), whatever the format, so peak memory is the size of the frame
+  plus the decode copies. CSV, TSV and NDJSON are parsed lazily or line by line, which keeps the
+  parse itself cheap, but all rows still end up in memory. Archive members are streamed to disk
+  under the caps above, but each member is then read by its own reader and collected the same way.
+  In a QA measurement a 40 MB UTF-8 CSV (1.4M rows) peaked at about 270 MB and an 80 MB UTF-16-LE
+  CSV at about 300 MB.
 - Archives add one more decompression pass per rerun and a temp directory per run; the raw zone
   holds only the archive, so a corrupt member is fixed by reprocessing from it.
 - Fixed-width, EBCDIC, PDF and proprietary binaries need a spec from the customer and stay pending
