@@ -81,9 +81,13 @@ Each code task: one issue, one branch `agent/<issue>-<slug>`, one PR; the owner 
   files. Blob is read, never written, in this version.
 - **Out of scope:** writing raw or bronze to Blob, event triggers, Key Vault, Databricks, silver.
 
-## Open questions
+## Resolved questions (owner, 2026-11-15)
 
-1. Container name and prefix layout: one prefix per source (for example `orders/`), matching the
-   landing folder name? (Recommended.)
-2. Should the stage step also accept a single blob name, or prefix only? (Prefix only keeps it
-   small.)
+The owner approved this plan and answered the two open questions:
+
+1. One prefix per source, matching the landing folder name (for example `orders/` for the `orders`
+   source).
+2. Prefix only is enough for version 1. No single-blob mode.
+
+Issues: task 0 #120, task 1 #113, task 2 #114, task 3 #115, task 4 #116, task 5 #117, task 6 #118,
+task 7 #119. The ADR for this plan is `docs/decisions/0003-azure-blob-source.md`.
