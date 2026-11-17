@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rules every agent follows in this repo. Standards live in `docs/`:
+Rules every agent follows in this repo, on top of the court-of-owls plugin's policies (`working-rules`, `routing`, `evidence-rule`, `nothing-sensitive`, `pre-release-dependency-scan`). Where they differ, the stricter rule wins. Standards live in `docs/`:
 [CODE_STYLE](docs/CODE_STYLE.md), [DATA_MODELING](docs/DATA_MODELING.md),
 [SECURITY](docs/SECURITY.md), [TESTING](docs/TESTING.md).
 
