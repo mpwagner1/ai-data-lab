@@ -1,7 +1,7 @@
 # 0003: Azure Blob Storage as a read-only source for test files
 
 Date: 2026-11-15
-Status: Proposed (waiting for the owner's approval). Plan: `docs/plans/2026-11-13-azure-blob-source.md`.
+Status: Accepted (approved by the owner 2026-11-17). Plan: `docs/plans/2026-11-13-azure-blob-source.md`.
 
 ## Context
 
