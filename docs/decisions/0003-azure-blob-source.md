@@ -3,6 +3,7 @@
 Date: 2026-11-15
 Status: Accepted (approved by the owner 2026-11-17). Plan: `docs/plans/2026-11-13-azure-blob-source.md`.
 Amended 2026-11-17: after the security review (issue 116) the code was tightened and this ADR now matches it. The owner approved the credential and total-cap decisions on 2026-11-17. Changes: `AzureCliCredential` only; a 2 GiB total cap; more than 100 blobs stages the first 100 and counts one extra failure; extra rejected names (a `.tmp` suffix compared case-insensitively, a backslash, a lone `.`); names must start with the prefix; container and account names are checked against Azure naming rules; the `azure` library logger is held at WARNING; the final summary is a log event.
+Clarified 2026-11-17 (owner): a total-cap overrun while a blob is streaming counts two failures (the blob, then the extra failure for the stop), as the code does.
 
 ## Context
 
@@ -47,9 +48,10 @@ decision only covers getting files in.
 - **Caps.** 256 MiB per blob and 100 blobs per run by default, checked against the blob properties
   before download and again on the bytes actually received. Flags can change them. More than 100
   blobs stages the first 100 and counts one extra failure, so it is never silent. A total cap of 2 GiB
-  (`--max-total-mib`) counts every byte received in the run; before a blob that would pass it,
-  staging stops, `TotalSizeCap` is logged and one extra failure is counted (exit 1). Blobs already
-  staged stay.
+  (`--max-total-mib`) counts every byte received in the run. Before a blob that would pass it by its
+  listed size, staging stops, `TotalSizeCap` is logged and one extra failure is counted (exit 1). If a
+  blob passes the cap while it is streaming, that blob fails with `TotalSizeCapError` and the same stop
+  and extra failure follow, so that case counts two failures. Blobs already staged stay.
 - **Logs and exit codes.** `key=value` logs with counts, blob names, sizes and hashes only: never tokens,
   URLs with query strings, connection strings, account keys or content. The `azure` library logger is
   held at WARNING, and the final summary is a log event (`azure_stage_run`). Exit 2 for a setup or
