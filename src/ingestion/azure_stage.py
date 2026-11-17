@@ -5,17 +5,26 @@ under `<prefix>` (no recursion) into `data/landing/<source>/<name after prefix>`
 unchanged on that folder. See docs/decisions/0003-azure-blob-source.md.
 
 Settings: env vars `AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_CONTAINER` only. Credential:
-`DefaultAzureCredential` (the `az login` session). Only list and download calls are made; nothing
+`AzureCliCredential` only (the `az login` session). `DefaultAzureCredential` is deliberately not
+used: its chain can fall back to another identity (environment, managed identity, editor). The
+credential and the client are closed after the run. Only list and download calls are made; nothing
 is ever uploaded, deleted, re-tiered or leased.
 
 Rules: blob names are untrusted (no `..`, control characters, separators beyond the prefix, empty
-names or the reserved `.tmp` suffix); folder markers and sub-prefixes are ignored and counted; an
+names, a lone `.`, or the reserved `.tmp` suffix compared case-insensitively; names must start
+with the prefix); folder markers and sub-prefixes are ignored and counted; an
 existing local file is never overwritten (same bytes: skipped, different bytes: that blob fails
 with `NameCollisionError`); caps (default 256 MiB per blob, 100 blobs) are checked on the blob
 properties and again on the bytes received. A rejected or failed blob does not stop the rest.
 More than `--max-blobs` blobs under the prefix counts as one extra failure, so it is never silent.
+`--max-total-mib` (default 2048, 2 GiB) caps every byte received in the run, staged and
+identical-skipped alike. Before a blob, if received-so-far plus its listed size would exceed the
+cap, staging stops there (that blob and later ones are not downloaded), `azure_stage_error` is
+logged with `error="TotalSizeCap"`, and one extra failure is counted so the run exits 1. The
+streamed bytes are checked too. Blobs already staged stay.
 
-Exit codes: 0 done or nothing to stage, 1 a blob failed, 2 setup, sign-in or access error.
+Exit codes: 0 done or nothing to stage, 1 a blob failed, 2 setup, sign-in or access error
+(only `AzureError` and `OSError` from the factory or the listing; other errors propagate).
 
 Test seam: everything talks to a `BlobContainer` (two methods: `list_blobs`, `read_blob`). Tests
 pass a fake to `stage(...)`, or a `container_factory` and `landing_root` to `main(...)`, so no
@@ -34,12 +43,13 @@ import os
 import re
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from azure.identity import DefaultAzureCredential
+from azure.core.exceptions import AzureError
+from azure.identity import AzureCliCredential
 from azure.storage.blob import BlobPrefix, BlobServiceClient, ContainerClient
 
 from ingestion import bronze
@@ -52,9 +62,10 @@ ENV_ACCOUNT = "AZURE_STORAGE_ACCOUNT"
 ENV_CONTAINER = "AZURE_STORAGE_CONTAINER"
 DEFAULT_MAX_BLOB_MIB = 256
 DEFAULT_MAX_BLOBS = 100
+DEFAULT_MAX_TOTAL_MIB = 2048
 _MIB = 1024 * 1024
 _ACCOUNT_PATTERN = re.compile(r"[a-z0-9]{3,24}")
-_CONTAINER_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?")
+_CONTAINER_PATTERN = re.compile(r"(?!.*--)[a-z0-9][a-z0-9-]{1,61}[a-z0-9]")  # 3-63, no "--"
 _RESERVED_SUFFIX = ".tmp"  # the temp name `publish` uses; a blob with it could clobber a temp file
 _EVENT_LEVELS = {"azure_stage_error": logging.ERROR, "azure_stage_rejected": logging.WARNING}
 
@@ -65,6 +76,10 @@ class NameCollisionError(Exception):
 
 class BlobTooLargeError(ValueError):
     """The blob is larger than the per-blob cap."""
+
+
+class TotalSizeCapError(ValueError):
+    """The bytes received in this run passed the total cap."""
 
 
 class RejectedNameError(ValueError):
@@ -108,8 +123,16 @@ class StageSummary:
 class AzureContainer:
     """Real adapter over `ContainerClient`. Read-only: `walk_blobs` and `download_blob` only."""
 
-    def __init__(self, client: ContainerClient) -> None:
+    def __init__(
+        self, client: ContainerClient, closers: tuple[Callable[[], None], ...] = ()
+    ) -> None:
         self._client = client
+        self._closers = closers
+
+    def close(self) -> None:
+        """Close the client and the credential (the callables given at build time)."""
+        for closer in self._closers:
+            closer()
 
     def list_blobs(self, prefix: str) -> Iterator[BlobInfo]:
         for item in self._client.walk_blobs(name_starts_with=prefix, delimiter="/"):
@@ -123,10 +146,15 @@ class AzureContainer:
 
 
 def open_container(account: str, container: str) -> BlobContainer:
-    """Build the real container client from the signed-in `DefaultAzureCredential`."""
+    """Build the real container client from the signed-in `AzureCliCredential`.
+
+    The caller closes the result (`AzureContainer.close`) to release the client and credential.
+    """
     url = f"https://{account}.blob.core.windows.net"
-    service = BlobServiceClient(url, credential=DefaultAzureCredential())
-    return AzureContainer(service.get_container_client(container))
+    credential = AzureCliCredential()
+    service = BlobServiceClient(url, credential=credential)
+    closers = (service.close, credential.close)
+    return AzureContainer(service.get_container_client(container), closers)
 
 
 def _quote(value: object) -> str:
@@ -161,6 +189,8 @@ def _has_control_char(text: str) -> bool:
 
 def local_name(blob_name: str, prefix: str) -> str:
     """Return the file name after the prefix, or raise RejectedNameError."""
+    if not blob_name.startswith(prefix):
+        raise RejectedNameError("blob name is outside the prefix")
     name = blob_name.removeprefix(prefix)
     unsafe = (
         not name
@@ -169,7 +199,7 @@ def local_name(blob_name: str, prefix: str) -> str:
         or "\\" in name
         or ".." in name
         or _has_control_char(name)
-        or name.endswith(_RESERVED_SUFFIX)
+        or name.casefold().endswith(_RESERVED_SUFFIX)
     )
     if unsafe:
         raise RejectedNameError("unsafe blob name")
@@ -184,8 +214,21 @@ class _Received:
     size: int = 0
 
 
+@dataclass
+class _Budget:
+    """Size limits for one run. `used` counts every byte received so far (all blobs)."""
+
+    max_blob_bytes: int
+    max_total_bytes: int
+    used: int = 0
+    stopped: bool = False  # the total cap was hit; no further blob is downloaded
+
+    def would_exceed(self, listed_size: int) -> bool:
+        return self.used + listed_size > self.max_total_bytes
+
+
 def _download(
-    container: BlobContainer, name: str, target: Path, max_bytes: int, received: _Received
+    container: BlobContainer, name: str, target: Path, budget: _Budget, received: _Received
 ) -> None:
     """Stream a blob to a temp file, then link it to `target` (no replace).
 
@@ -199,8 +242,11 @@ def _download(
         with temp.open("wb") as handle:
             for chunk in container.read_blob(name):
                 size += len(chunk)
-                if size > max_bytes:
+                budget.used += len(chunk)
+                if size > budget.max_blob_bytes:
                     raise BlobTooLargeError("blob exceeds the size cap while streaming")
+                if budget.used > budget.max_total_bytes:
+                    raise TotalSizeCapError("run exceeds the total size cap while streaming")
                 digest.update(chunk)
                 handle.write(chunk)
         received.sha256 = digest.hexdigest()
@@ -216,19 +262,23 @@ def _is_same_file(target: Path, sha256: str) -> bool:
 
 
 def _stage_blob(
-    container: BlobContainer, info: BlobInfo, name: str, folder: Path, max_bytes: int
+    container: BlobContainer,
+    info: BlobInfo,
+    name: str,
+    folder: Path,
+    budget: _Budget,
+    received: _Received,
 ) -> bool:
     """Download one blob. Return True if staged, False if an identical file was already there.
 
     Raises NameCollisionError if a different file has the name, BlobTooLargeError over the cap.
     """
-    if info.size > max_bytes:
+    if info.size > budget.max_blob_bytes:
         raise BlobTooLargeError("blob exceeds the size cap")
     target = folder / name
-    received = _Received()
     exists = False
     try:
-        _download(container, info.name, target, max_bytes, received)
+        _download(container, info.name, target, budget, received)
     except FileExistsError:
         if not os.path.lexists(target):
             raise  # not a name clash (for example the folder path is a file)
@@ -258,17 +308,26 @@ def _list_candidates(
 
 
 def _process(
-    container: BlobContainer, info: BlobInfo, prefix: str, folder: Path, source: str, max_bytes: int
+    container: BlobContainer,
+    info: BlobInfo,
+    prefix: str,
+    folder: Path,
+    source: str,
+    budget: _Budget,
 ) -> str:
     """Stage one blob; return `staged`, `skipped` or `failed`. Never raises."""
     started = time.monotonic()
     problem = ""
     staged = False
     sha256 = ""
+    received = _Received()
     try:
         name = local_name(info.name, prefix)
-        staged = _stage_blob(container, info, name, folder, max_bytes)
+        staged = _stage_blob(container, info, name, folder, budget, received)
         sha256 = hash_file(folder / name)
+    except TotalSizeCapError as error:
+        budget.stopped = True
+        problem = type(error).__name__
     except Exception as error:  # noqa: BLE001 - one bad blob must not stop the rest
         problem = type(error).__name__  # the message can carry paths or library details
     duration = round(time.monotonic() - started, 3)
@@ -280,11 +339,30 @@ def _process(
         event,
         source=source,
         blob_name=info.name,
-        size=info.size,
+        size=received.size,  # the bytes actually received, not the listed size
         file_hash=sha256,
         duration_s=duration,
     )
     return "staged" if staged else "skipped"
+
+
+def _process_all(
+    container: BlobContainer,
+    blobs: list[BlobInfo],
+    prefix: str,
+    folder: Path,
+    source: str,
+    budget: _Budget,
+) -> list[str]:
+    """Process blobs in order; stop before the first one that would pass the total cap."""
+    outcomes: list[str] = []
+    for info in blobs:
+        if budget.would_exceed(info.size):
+            budget.stopped = True
+        if budget.stopped:
+            break
+        outcomes.append(_process(container, info, prefix, folder, source, budget))
+    return outcomes
 
 
 def stage(
@@ -294,18 +372,23 @@ def stage(
     landing_root: Path,
     max_blob_bytes: int = DEFAULT_MAX_BLOB_MIB * _MIB,
     max_blobs: int = DEFAULT_MAX_BLOBS,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_MIB * _MIB,
 ) -> StageSummary:
     """Download the blobs directly under `prefix` into `<landing_root>/<source>/`.
 
     `prefix` must already be normalized (see `normalize_prefix`). Listing errors propagate (the
-    CLI maps them to exit 2); per-blob errors are counted as failed.
+    CLI maps them to exit 2); per-blob errors are counted as failed. Hitting the blob-count cap or
+    the total size cap counts one extra failure each.
     """
     blobs, ignored, over_limit = _list_candidates(container, prefix, max_blobs)
     folder = landing_root / source
-    outcomes = [_process(container, i, prefix, folder, source, max_blob_bytes) for i in blobs]
-    failed = outcomes.count("failed") + int(over_limit)
+    budget = _Budget(max_blob_bytes, max_total_bytes)
+    outcomes = _process_all(container, blobs, prefix, folder, source, budget)
+    failed = outcomes.count("failed") + int(over_limit) + int(budget.stopped)
     if over_limit:
         _log("azure_stage_error", source=source, error="TooManyBlobs", max_blobs=max_blobs)
+    if budget.stopped:
+        _log("azure_stage_error", source=source, error="TotalSizeCap", received=budget.used)
     summary = StageSummary(outcomes.count("staged"), outcomes.count("skipped"), ignored, failed)
     _log(
         "azure_stage_run",
@@ -345,10 +428,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=DEFAULT_MAX_BLOBS,
         help=f"most blobs per run (default {DEFAULT_MAX_BLOBS})",
     )
+    parser.add_argument(
+        "--max-total-mib",
+        type=_positive_int,
+        default=DEFAULT_MAX_TOTAL_MIB,
+        help=(
+            f"cap on all bytes received in the run, in MiB (default {DEFAULT_MAX_TOTAL_MIB}); "
+            "staging stops before the blob that would pass it and the run exits 1"
+        ),
+    )
     return parser.parse_args(argv)
 
 
-def _read_settings(environ: dict[str, str] | os._Environ[str]) -> tuple[str, str]:
+def _read_settings(environ: Mapping[str, str]) -> tuple[str, str]:
     """Return (account, container) from the environment; raise ValueError naming the setting."""
     values = []
     for key, pattern in ((ENV_ACCOUNT, _ACCOUNT_PATTERN), (ENV_CONTAINER, _CONTAINER_PATTERN)):
@@ -364,6 +456,31 @@ def _read_settings(environ: dict[str, str] | os._Environ[str]) -> tuple[str, str
 def _setup_error(error: str, **fields: object) -> int:
     _log("azure_stage_error", error=error, **fields)
     return 2
+
+
+def _run_stage(
+    container_factory: ContainerFactory,
+    account: str,
+    container_name: str,
+    prefix: str,
+    args: argparse.Namespace,
+    landing_root: Path | None,
+) -> StageSummary:
+    """Build the container, stage, and always close the real client and credential."""
+    container = container_factory(account, container_name)
+    try:
+        return stage(
+            container,
+            args.source,
+            prefix,
+            landing_root or bronze.LANDING_ROOT,
+            max_blob_bytes=args.max_blob_mib * _MIB,
+            max_blobs=args.max_blobs,
+            max_total_bytes=args.max_total_mib * _MIB,
+        )
+    finally:
+        if isinstance(container, AzureContainer):
+            container.close()
 
 
 def main(
@@ -389,22 +506,11 @@ def main(
     except ValueError as error:
         message = str(error)  # our own fixed text: names the setting, never its value
         return _setup_error("InvalidSetting", detail=message)
-    problem = ""
-    summary = StageSummary()
     try:
-        container = container_factory(account, container_name)
-        summary = stage(
-            container,
-            args.source,
-            prefix,
-            landing_root or bronze.LANDING_ROOT,
-            max_blob_bytes=args.max_blob_mib * _MIB,
-            max_blobs=args.max_blobs,
-        )
-    except Exception as error:  # noqa: BLE001 - listing, sign-in or access failure
-        problem = type(error).__name__  # library messages can carry URLs; log the type only
-    if problem:
-        return _setup_error(problem, source=args.source)
+        summary = _run_stage(container_factory, account, container_name, prefix, args, landing_root)
+    except (AzureError, OSError) as error:  # sign-in, access or listing failure
+        # Library messages can carry URLs; log the type only. Other errors are bugs: let them out.
+        return _setup_error(type(error).__name__, source=args.source)
     return 1 if summary.failed else 0
 
 

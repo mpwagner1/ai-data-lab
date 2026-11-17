@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from azure.core.exceptions import AzureError, ClientAuthenticationError
+from azure.identity import CredentialUnavailableError
 from azure.storage.blob import BlobPrefix
 
 from ingestion import azure_stage
@@ -246,7 +248,7 @@ def test_logs_never_hold_tokens_urls_content_or_settings(
     azure_stage.main(["orders", "orders/"], lambda a, c: container, landing_root=tmp_path)
     failing = azure_stage.main(
         ["orders", "orders/"],
-        lambda a, c: (_ for _ in ()).throw(RuntimeError("sig=TOKEN123 https://x?sv=1")),
+        lambda a, c: (_ for _ in ()).throw(AzureError("sig=TOKEN123 https://x?sv=1")),
         landing_root=tmp_path,
     )
 
@@ -273,19 +275,6 @@ def test_azure_sdk_logger_is_kept_quiet(tmp_path: Path, monkeypatch: pytest.Monk
     azure_stage.main(["orders", "orders/"], lambda a, c: FakeContainer({}), landing_root=tmp_path)
 
     assert logging.getLogger("azure").level == logging.WARNING
-
-
-def test_no_write_calls_exist_in_the_module() -> None:
-    source = Path(azure_stage.__file__).read_text()
-    for call in (
-        "upload_blob",
-        "delete_blob",
-        "set_blob",
-        "acquire_lease",
-        "start_copy",
-        "stage_block",
-    ):
-        assert call not in source
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +458,9 @@ def test_empty_listing_creates_nothing_and_succeeds(tmp_path: Path) -> None:
         "a.tmp",
         ".tmp",
         "a.csv.tmp",
+        "a.TMP",
+        "a.csv.Tmp",
+        ".TMP",
     ],
 )
 def test_local_name_rejects_unsafe_names(name: str) -> None:
@@ -521,15 +513,27 @@ def test_traversal_name_never_writes_outside_the_landing_folder(tmp_path: Path) 
     assert not list(tmp_path.rglob("evil*"))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="GAP in src: removeprefix in local_name stages a listed name outside the prefix",
-)
 def test_listed_name_outside_the_prefix_is_not_staged(tmp_path: Path) -> None:
     summary, folder = _run(FakeContainer({"other.csv": b"x"}), tmp_path)
 
-    assert summary.staged == 0
+    assert summary == StageSummary(failed=1)
     assert not folder.exists()
+
+
+def test_local_name_raises_when_the_blob_is_outside_the_prefix() -> None:
+    with pytest.raises(azure_stage.RejectedNameError):
+        azure_stage.local_name("other.csv", "orders/")
+
+
+def test_mixed_case_tmp_suffix_cannot_clobber_a_publish_temp_file(tmp_path: Path) -> None:
+    container = FakeContainer({"o/A.CSV.TMP": b"evil", "o/a.csv": b"good"})
+
+    summary = azure_stage.stage(container, "o", "o/", tmp_path)
+
+    assert summary == StageSummary(staged=1, failed=1)  # the .TMP blob is not silently dropped
+    assert "read:o/A.CSV.TMP" not in container.calls
+    assert _files(tmp_path / "o") == ["a.csv"]
+    assert (tmp_path / "o" / "a.csv").read_bytes() == b"good"
 
 
 def test_rejected_name_is_not_downloaded(tmp_path: Path) -> None:
@@ -893,7 +897,7 @@ def test_invalid_account_exits_two_and_never_echoes_the_value(
 
 
 @pytest.mark.parametrize(
-    "value", ["BAD_CONTAINER", "-start", "end-", "UPPER", "x" * 64, "has space"]
+    "value", ["BAD_CONTAINER", "-start", "end-", "UPPER", "x" * 64, "has space", "ab", "a--b"]
 )
 def test_invalid_container_exits_two_and_never_echoes_the_value(
     tmp_path: Path,
@@ -913,11 +917,7 @@ def test_invalid_container_exits_two_and_never_echoes_the_value(
     assert value not in caplog.text + captured.out + captured.err
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="GAP in src: _CONTAINER_PATTERN accepts a 1 character name; Azure requires 3-63",
-)
-@pytest.mark.parametrize("value", ["a"])
+@pytest.mark.parametrize("value", ["a", "ab", "a--b", "my--container", "x" * 64])
 def test_container_name_shorter_than_three_characters_is_invalid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
@@ -933,6 +933,20 @@ def test_container_name_shorter_than_three_characters_is_invalid(
 
     assert code == 2
     assert built == []
+
+
+@pytest.mark.parametrize("value", ["abc", "a-b", "a" * 63, "a-" + "b" * 59 + "-c", "1a2"])
+def test_container_name_of_three_to_sixty_three_characters_is_accepted(value: str) -> None:
+    settings = {azure_stage.ENV_ACCOUNT: "testaccount", azure_stage.ENV_CONTAINER: value}
+
+    assert azure_stage._read_settings(settings) == ("testaccount", value)
+
+
+def test_container_name_with_consecutive_hyphens_is_invalid() -> None:
+    settings = {azure_stage.ENV_ACCOUNT: "testaccount", azure_stage.ENV_CONTAINER: "my--box"}
+
+    with pytest.raises(ValueError, match="invalid setting"):
+        azure_stage._read_settings(settings)
 
 
 def test_invalid_env_value_with_a_secret_shape_is_never_logged(
@@ -1020,14 +1034,43 @@ def test_factory_error_exits_two_logging_the_type_only(
 def test_listing_error_exits_two_logging_the_type_only(
     tmp_path: Path, azure_env: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    container = RaisingListingContainer(RuntimeError(f"AuthorizationFailure {SENTINEL_TOKEN}"))
+    container = RaisingListingContainer(AzureError(f"AuthorizationFailure {SENTINEL_TOKEN}"))
     caplog.set_level(logging.DEBUG)
 
     code = _main(["orders", "orders/"], container, tmp_path)
 
     assert code == 2
-    assert "RuntimeError" in caplog.text
+    assert "AzureError" in caplog.text
     assert SENTINEL_TOKEN not in caplog.text
+
+
+@pytest.mark.parametrize("error", [ClientAuthenticationError("x"), CredentialUnavailableError("x")])
+def test_sign_in_failures_exit_two(tmp_path: Path, azure_env: None, error: Exception) -> None:
+    def factory(account: str, container: str) -> FakeContainer:
+        raise error
+
+    assert azure_stage.main(["orders", "orders/"], factory, landing_root=tmp_path) == 2
+
+
+def test_sign_in_failure_during_listing_exits_two(tmp_path: Path, azure_env: None) -> None:
+    container = RaisingListingContainer(CredentialUnavailableError("x"))
+
+    assert _main(["orders", "orders/"], container, tmp_path) == 2
+
+
+def test_programming_error_in_the_factory_propagates(tmp_path: Path, azure_env: None) -> None:
+    def factory(account: str, container: str) -> FakeContainer:
+        raise RuntimeError("a bug, not an Azure failure")
+
+    with pytest.raises(RuntimeError):
+        azure_stage.main(["orders", "orders/"], factory, landing_root=tmp_path)
+
+
+def test_programming_error_in_the_listing_propagates(tmp_path: Path, azure_env: None) -> None:
+    container = RaisingListingContainer(KeyError("a bug"))
+
+    with pytest.raises(KeyError):
+        _main(["orders", "orders/"], container, tmp_path)
 
 
 def test_listing_error_after_some_entries_stages_nothing(tmp_path: Path, azure_env: None) -> None:
@@ -1182,10 +1225,67 @@ def test_adapter_end_to_end_with_stage_only_uses_list_and_download(tmp_path: Pat
     }
 
 
-def test_open_container_uses_default_credential_and_an_https_account_url_only(
+class RecordingDownload:
+    def __init__(self, parts: list[bytes], used: list[str]) -> None:
+        self.parts = parts
+        self.used = used
+
+    def chunks(self) -> Iterator[bytes]:
+        self.used.append("chunks")
+        yield from self.parts
+
+    def __getattr__(self, name: str) -> object:
+        self.used.append(name)
+        raise AssertionError(f"download used a method outside the allow-list: {name}")
+
+
+class RecordingContainerClient:
+    """Records the name of every method the adapter calls; any unknown attribute is recorded too."""
+
+    def __init__(self, items: list[object], data: dict[str, list[bytes]]) -> None:
+        self.items = items
+        self.data = data
+        self.used: list[str] = []
+
+    def walk_blobs(self, **kwargs: object) -> Iterator[object]:
+        self.used.append("walk_blobs")
+        return iter(self.items)
+
+    def download_blob(self, name: str) -> RecordingDownload:
+        self.used.append("download_blob")
+        return RecordingDownload(self.data[name], self.used)
+
+    def __getattr__(self, name: str) -> object:
+        self.used.append(name)
+        raise AssertionError(f"adapter used a method outside the allow-list: {name}")
+
+
+def test_adapter_only_uses_walk_blobs_download_blob_and_chunks(tmp_path: Path) -> None:
+    client = RecordingContainerClient(
+        [BlobPrefix(prefix="orders/sub/", delimiter="/"), _blob_item("orders/a.csv", 5)],
+        {"orders/a.csv": [b"id\n", b"1\n"]},
+    )
+
+    summary = azure_stage.stage(
+        azure_stage.AzureContainer(client),  # type: ignore[arg-type]
+        "orders",
+        "orders/",
+        tmp_path,
+    )
+
+    assert summary.staged == 1
+    assert set(client.used) == {"walk_blobs", "download_blob", "chunks"}
+
+
+def test_open_container_builds_an_azure_cli_credential_and_never_the_default_chain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: dict[str, object] = {}
+    closed: list[str] = []
+
+    class FakeCredential:
+        def close(self) -> None:
+            closed.append("credential")
 
     class FakeService:
         def __init__(self, url: str, credential: object) -> None:
@@ -1196,19 +1296,54 @@ def test_open_container_uses_default_credential_and_an_https_account_url_only(
             seen["container"] = container
             return FakeContainerClient([])
 
-    credential = object()
+        def close(self) -> None:
+            closed.append("service")
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("DefaultAzureCredential must never be built")
+
     monkeypatch.setattr(azure_stage, "BlobServiceClient", FakeService)
-    monkeypatch.setattr(azure_stage, "DefaultAzureCredential", lambda: credential)
+    monkeypatch.setattr(azure_stage, "AzureCliCredential", FakeCredential)
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", forbidden)
+    assert not hasattr(azure_stage, "DefaultAzureCredential")
 
     result = azure_stage.open_container("testaccount", "testcontainer")
 
     assert isinstance(result, azure_stage.AzureContainer)
-    assert seen == {
-        "url": "https://testaccount.blob.core.windows.net",
-        "credential": credential,
-        "container": "testcontainer",
-    }
+    assert isinstance(seen["credential"], FakeCredential)
+    assert seen["url"] == "https://testaccount.blob.core.windows.net"
+    assert seen["container"] == "testcontainer"
     assert "?" not in str(seen["url"])
+    result.close()
+    assert sorted(closed) == ["credential", "service"]
+
+
+def test_main_closes_the_real_adapter_after_the_run(tmp_path: Path, azure_env: None) -> None:
+    closed: list[str] = []
+    client = FakeContainerClient([])
+
+    def factory(account: str, container: str) -> azure_stage.AzureContainer:
+        return azure_stage.AzureContainer(client, (lambda: closed.append("closed"),))  # type: ignore[arg-type]
+
+    assert azure_stage.main(["orders", "orders/"], factory, landing_root=tmp_path) == 0
+    assert closed == ["closed"]
+
+
+def test_main_closes_the_real_adapter_when_listing_fails(tmp_path: Path, azure_env: None) -> None:
+    closed: list[str] = []
+
+    class BrokenClient(FakeContainerClient):
+        def walk_blobs(self, **kwargs: object) -> Iterator[object]:
+            raise AzureError("x")
+
+    def factory(account: str, container: str) -> azure_stage.AzureContainer:
+        return azure_stage.AzureContainer(
+            BrokenClient([]),  # type: ignore[arg-type]
+            (lambda: closed.append("closed"),),
+        )
+
+    assert azure_stage.main(["orders", "orders/"], factory, landing_root=tmp_path) == 2
+    assert closed == ["closed"]
 
 
 # ---------------------------------------------------------------------------
@@ -1388,3 +1523,113 @@ def test_staging_does_not_leave_temp_files_after_any_outcome(tmp_path: Path) -> 
     _run(container, tmp_path, max_blob_bytes=10)
 
     assert not [name for name in os.listdir(folder) if name.endswith(".tmp")]
+
+
+def test_write_and_skip_logs_report_the_bytes_received_not_the_listed_size(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    container = LyingContainer({"orders/big.csv": b"x" * 10})  # listed as 1 byte
+
+    _run(container, tmp_path)
+    _run(container, tmp_path)
+
+    lines = [r.getMessage() for r in caplog.records if "azure_stage_write" in r.getMessage()]
+    lines += [r.getMessage() for r in caplog.records if "azure_stage_skip" in r.getMessage()]
+    assert len(lines) == 2
+    assert all("size=10 " in line for line in lines)
+    assert not any("size=1 " in line for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# Total size cap
+# ---------------------------------------------------------------------------
+
+
+def test_total_cap_default_is_two_gib() -> None:
+    assert azure_stage.DEFAULT_MAX_TOTAL_MIB * 1024 * 1024 == 2 * 1024**3
+
+
+def test_total_exactly_at_the_cap_is_staged(tmp_path: Path) -> None:
+    container = FakeContainer({"orders/a.csv": b"1234", "orders/b.csv": b"5678"})
+
+    summary, folder = _run(container, tmp_path, max_total_bytes=8)
+
+    assert summary == StageSummary(staged=2)
+    assert _files(folder) == ["a.csv", "b.csv"]
+
+
+def test_total_one_byte_over_the_cap_stops_before_that_blob(tmp_path: Path) -> None:
+    container = FakeContainer({"orders/a.csv": b"1234", "orders/b.csv": b"56789"})
+
+    summary, folder = _run(container, tmp_path, max_total_bytes=8)
+
+    assert summary == StageSummary(staged=1, failed=1)
+    assert _files(folder) == ["a.csv"]  # already staged blobs stay
+    assert "read:orders/b.csv" not in container.calls
+
+
+def test_total_cap_stop_skips_later_blobs_even_small_ones(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    container = FakeContainer(
+        {"orders/a.csv": b"1234", "orders/b.csv": b"x" * 20, "orders/c.csv": b"1"}
+    )
+
+    summary, folder = _run(container, tmp_path, max_total_bytes=10)
+
+    assert summary == StageSummary(staged=1, failed=1)
+    assert _files(folder) == ["a.csv"]
+    assert "read:orders/c.csv" not in container.calls
+    errors = [r.getMessage() for r in caplog.records if 'error="TotalSizeCap"' in r.getMessage()]
+    assert len(errors) == 1
+
+
+def test_identical_skipped_bytes_count_toward_the_total(tmp_path: Path) -> None:
+    first = FakeContainer({"orders/a.csv": b"1234"})
+    _run(first, tmp_path)
+    second = FakeContainer({"orders/a.csv": b"1234", "orders/b.csv": b"5678"})
+
+    summary, folder = _run(second, tmp_path, max_total_bytes=7)
+
+    assert summary == StageSummary(skipped=1, failed=1)
+    assert _files(folder) == ["a.csv"]
+
+
+def test_total_cap_is_enforced_on_streamed_bytes(tmp_path: Path) -> None:
+    container = CountingStreamContainer({"orders/a.csv": b"", "orders/b.csv": b""}, listed_size=1)
+
+    summary, folder = _run(container, tmp_path, max_total_bytes=8)
+
+    assert summary.failed == 2  # the blob that overflowed, plus the extra total-cap failure
+    assert summary.staged == 0
+    assert container.chunks_served < 10
+    assert _files(folder) == []
+
+
+def test_cli_total_cap_flag_exits_one_and_keeps_staged_blobs(
+    tmp_path: Path, azure_env: None
+) -> None:
+    one_mib = b"x" * (1024 * 1024)
+    container = FakeContainer({"orders/a.csv": one_mib, "orders/b.csv": one_mib})
+
+    code = _main(["orders", "orders/", "--max-total-mib", "1"], container, tmp_path)
+
+    assert code == 1
+    assert _files(tmp_path / "orders") == ["a.csv"]
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+def test_cli_rejects_a_non_positive_total_cap(tmp_path: Path, azure_env: None, value: str) -> None:
+    with pytest.raises(SystemExit) as raised:
+        _main(["orders", "orders/", "--max-total-mib", value], FakeContainer({}), tmp_path)
+
+    assert raised.value.code == 2
+
+
+def test_help_documents_the_total_cap(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        azure_stage.main(["--help"])
+
+    assert "--max-total-mib" in capsys.readouterr().out
