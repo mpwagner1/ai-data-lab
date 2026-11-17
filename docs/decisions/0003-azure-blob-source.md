@@ -2,6 +2,7 @@
 
 Date: 2026-11-15
 Status: Accepted (approved by the owner 2026-11-17). Plan: `docs/plans/2026-11-13-azure-blob-source.md`.
+Amended 2026-11-17: after the security review (issue 116) the code was tightened and this ADR now matches it. The owner approved the credential and total-cap decisions on 2026-11-17. Changes: `AzureCliCredential` only; a 2 GiB total cap; more than 100 blobs stages the first 100 and counts one extra failure; extra rejected names (a `.tmp` suffix compared case-insensitively, a backslash, a lone `.`); names must start with the prefix; container and account names are checked against Azure naming rules; the `azure` library logger is held at WARNING; the final summary is a log event.
 
 ## Context
 
@@ -24,14 +25,19 @@ decision only covers getting files in.
 - **Read-only.** The code uses only list and download calls. It never writes, deletes, renames or
   re-tiers a blob. The owner grants the `Storage Blob Data Reader` role on the single test container, so
   the platform refuses writes even if the code were wrong.
-- **Authentication.** `DefaultAzureCredential`, which uses the owner's `az login` session. No account
+- **Authentication.** `AzureCliCredential` only, which uses the owner's `az login` session.
+  `DefaultAzureCredential` is not used because its chain can pick another identity (environment,
+  managed identity, editor). The credential and client are closed after the run. No account
   key, connection string, SAS token or client secret is used, stored or logged. Tokens are short-lived.
 - **Settings.** `AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_CONTAINER` come from environment variables
-  only. The owner keeps the values in 1Password and runs the command with `op run --env-file=.env`
+  only, and are checked against Azure naming rules (account 3 to 24 lowercase letters and digits;
+  container 3 to 63 characters, lowercase letters, digits and single hyphens). The owner keeps the values in 1Password and runs the command with `op run --env-file=.env`
   (`docs/SECURITY.md`). `.env.example` has placeholder references only. The code never calls 1Password.
   No account, container, subscription or 1Password name appears in the repo, logs or notes.
 - **Blob names are untrusted data.** A blob is rejected if its name has a path separator beyond the
-  prefix, `..`, a control character, or is empty. Zero-byte folder markers (created by accounts with a
+  prefix, a backslash, `..`, a lone `.`, a control character, a `.tmp` suffix (compared
+  case-insensitively, because it is the temp name used when publishing), or is empty, or if it does
+  not start with the prefix. Zero-byte folder markers (created by accounts with a
   hierarchical namespace) are skipped and counted. The local file name is the part after the prefix and
   is never used to build any other path.
 - **Never overwrite a local file.** If a file with that name already exists with different bytes, that
@@ -39,9 +45,14 @@ decision only covers getting files in.
   skipped. A changed blob therefore needs a new name or a cleared landing file, which keeps the raw zone
   and the hash-based history honest.
 - **Caps.** 256 MiB per blob and 100 blobs per run by default, checked against the blob properties
-  before download and again on the bytes actually received. Flags can change them.
+  before download and again on the bytes actually received. Flags can change them. More than 100
+  blobs stages the first 100 and counts one extra failure, so it is never silent. A total cap of 2 GiB
+  (`--max-total-mib`) counts every byte received in the run; before a blob that would pass it,
+  staging stops, `TotalSizeCap` is logged and one extra failure is counted (exit 1). Blobs already
+  staged stay.
 - **Logs and exit codes.** `key=value` logs with counts, blob names, sizes and hashes only: never tokens,
-  URLs with query strings, connection strings, account keys or content. Exit 2 for a setup or
+  URLs with query strings, connection strings, account keys or content. The `azure` library logger is
+  held at WARNING, and the final summary is a log event (`azure_stage_run`). Exit 2 for a setup or
   authentication error (missing setting, not signed in, no access), 1 if at least one blob failed, 0 when
   done or nothing to stage. These match the bronze exit codes.
 - **Dependencies.** `azure-storage-blob` and `azure-identity`, added with `uv add` and committed in
