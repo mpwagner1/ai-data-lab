@@ -55,7 +55,7 @@ lake/raw/<source>/receive_date=YYYY-MM-DD/<file_hash><ext>     the exact bytes, 
 lake/bronze/<source>/ingest_date=YYYY-MM-DD/<file_hash><run_ts>_<8 hex>.parquet
 ```
 
-**Landing.** Drop files in `data/landing/<source>/`. Hidden files, `~$` owner files, lock files,
+**Landing.** Drop files in `data/landing/<source>/`, or stage them from Azure Blob Storage (section 10). Hidden files, `~$` owner files, lock files,
 subfolders and symlinks are not loaded (section 7). The loader never moves or deletes a landing file.
 
 **Receive (raw zone).** Each file is hashed and copied unchanged to
@@ -330,7 +330,8 @@ config message can echo config text.
   name, so names such as `../x` or absolute paths cannot escape. The caps in section 4 bound the cost.
 - **The source name** must match `[A-Za-z0-9][A-Za-z0-9_-]*`, so it cannot escape the lake.
 - **No secrets or row data** in logs or docs. The write path makes no network calls and needs no
-  credentials. Examples use synthetic names and values.
+  credentials. The Azure staging step (section 10) is the only code that calls Azure. Examples use
+  synthetic names and values.
 
 ## 8. Assumptions and limits
 
@@ -370,6 +371,7 @@ config message can echo config text.
 | `src/ingestion/parquet_reader.py` | Parquet, converted to strings |
 | `src/ingestion/archives.py` | Zip and gzip expansion, member safety and caps |
 | `src/ingestion/archive_ingest.py` | Each archive member through the normal path; archive logs; `--pending` for members |
+| `src/ingestion/azure_stage.py` | Azure Blob staging into the landing folder: settings, listing, name and cap rules, staging exit codes (section 10) |
 | `contracts/bronze/_metadata.yaml` | The metadata columns and their meaning |
 | `tests/ingestion/` | pytest tests, one file per module group; synthetic fixtures in `tests/fixtures/` |
 
@@ -411,7 +413,89 @@ Rules a reader must follow:
 - Let `UnicodeError` through: bronze turns it into an `encoding` hold. Log nothing from content;
   counts and indices are fine. Header-only input is a zero-row part; empty input must raise.
 
-## 10. How it was built
+## 10. Reading test files from Azure Blob Storage
+
+Test files can sit in a private Azure Blob Storage container instead of the repo. The staging step
+`ingestion.azure_stage` downloads the blobs under one container prefix into `data/landing/<source>/`.
+Bronze then runs on that folder unchanged, with the same raw zone, skip check, exit codes and logs
+as above. The raw zone and bronze stay on the local disk, and nothing is written to Blob. The
+reasons are in [ADR 0003](decisions/0003-azure-blob-source.md).
+
+```bash
+uv run python -m ingestion.azure_stage <source> <prefix>   # download blobs into data/landing/<source>/
+uv run python -m ingestion.bronze <source>                 # then load them as any landing file
+```
+
+The prefix is the container folder for the source: `orders/` for the `orders` source. Blob
+`orders/a.csv` is staged as `data/landing/orders/a.csv`. Staging creates the folder when it
+downloads a blob.
+
+Settings come only from the environment: `AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_CONTAINER`.
+Sign in with `az login` first. The code uses only that session (`AzureCliCredential`), and your user
+needs the `Storage Blob Data Reader` role on the container ([SECURITY](SECURITY.md)).
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--max-blob-mib` | 256 | Largest blob, in MiB. Checked on the listed size before download and on the bytes received |
+| `--max-blobs` | 100 | Most blobs staged per run. Blobs past this count are not staged, and that counts as one extra failure |
+| `--max-total-mib` | 2048 | Most bytes received in one run (2 GiB), staged and identical-skipped alike |
+
+Each flag takes a whole number of at least 1. Any other value exits 2.
+
+- **One prefix, not recursive.** Only blobs directly under the prefix are listed. Sub-prefixes
+  (folders) and folder markers (zero-byte names ending in `/`) are ignored and counted in
+  `ignored`. The name of each skipped entry is logged (`azure_stage_ignored`).
+- **Never overwrites.** A local file with the same name and the same bytes is skipped. Different
+  bytes fail that blob as a name collision (`NameCollisionError`), and nothing is replaced. To load
+  a changed blob, give it a new name, or remove the old landing file yourself.
+- **Names are untrusted.** A blob is rejected if its name after the prefix is empty, `.` or `..`,
+  contains `/`, `\` or `..`, has a control character, or ends in `.tmp` (in any case). The prefix
+  itself must not be empty and must not contain `..`, a backslash, a control character or start
+  with `/`. Otherwise the run exits 2.
+- **Failures do not stop the run.** A rejected or failed blob is logged as `azure_stage_error` with
+  its exception type, counted, and the other blobs continue.
+- **Size caps.** A blob over `--max-blob-mib` fails before download. A blob that streams past the
+  cap fails too, and nothing is written for it.
+- **Blob count cap.** Blobs past `--max-blobs` are not staged. The run counts one extra failure
+  (`error=TooManyBlobs`).
+- **Total cap.** Before a blob that would take the run past `--max-total-mib`, staging stops. That
+  blob and the later ones are not downloaded, `azure_stage_error error=TotalSizeCap` is logged, and
+  one extra failure is counted. Blobs already staged stay. If a blob's bytes pass the cap while it
+  streams, that blob fails with `TotalSizeCapError`, and the same stop and extra failure follow.
+- **A listing error stages nothing.** The listing is read before the first download, so a failed
+  listing downloads nothing.
+- **Read only.** The code makes only list and download calls. It never writes, deletes, renames or
+  re-tiers a blob.
+
+Exit codes for the staging step. It has no code 3: a staged file is not "held" until bronze reads it.
+
+| Code | Meaning |
+| --- | --- |
+| 2 | Setup, sign-in or access error before any download: invalid source or prefix, a missing or malformed `AZURE_STORAGE_ACCOUNT` or `AZURE_STORAGE_CONTAINER`, a bad flag, no `az login` session, or no read access. Logged as `azure_stage_error` with the exception type |
+| 1 | At least one blob failed (rejected, name collision, over a cap, or a download error, including a sign-in error during a download), or a blob count or total cap was hit. Blobs already staged stay |
+| 0 | Every blob was staged or skipped, or the prefix had nothing to stage |
+
+Bronze has its own exit codes (section 5). Exit 0 from staging does not mean bronze has loaded
+everything; `ingestion.bronze <source> --pending` shows what is still held.
+
+Logs are `event=<name>` followed by `key=value` pairs, with string values JSON-quoted, as in bronze.
+
+| Event | Level | Keys | Meaning |
+| --- | --- | --- | --- |
+| `azure_stage_write` | INFO | `source`, `blob_name`, `size`, `file_hash`, `duration_s` | A blob was staged. `size` is the bytes received |
+| `azure_stage_skip` | INFO | `source`, `blob_name`, `size`, `file_hash`, `duration_s` | An identical local file was already there. Nothing was written |
+| `azure_stage_ignored` | INFO | `file_name` | A folder marker or sub-prefix was skipped |
+| `azure_stage_error` | ERROR | `source`, `blob_name`, `error` for a blob; `error` and `source` for setup and listing errors; `detail` (the setting name) for a missing or malformed setting; `max_blobs` or `received` with the two caps | A blob failed, a cap was hit, or setup failed. A setting is named in the log, never its value |
+| `azure_stage_run` | INFO | `source`, `staged`, `skipped`, `ignored`, `failed` | Summary of the run |
+
+The logs never contain tokens, URLs or query strings, connection strings, the account or container
+values, or blob content. Blob names are logged. Library error messages are never logged, only their
+type, and the `azure` library logger is held at WARNING so request URLs stay out of the output.
+
+**Not built:** writing the raw zone or bronze to Blob, event triggers, Key Vault, scheduled staging,
+recursive listing and single-blob staging. See [ADR 0003, Not built](decisions/0003-azure-blob-source.md#not-built).
+
+## 11. How it was built
 
 Alfred (the head agent) wrote the [plan](plans/2026-11-12-bronze-multi-format.md) and the ADRs,
 and Michael approved them. Each task then got an issue and went through the `builder` agent (code
@@ -441,7 +525,7 @@ Review changed the design several times. Some examples:
 
 Details of each change are in [`plans/log.md`](plans/log.md).
 
-## 11. What comes next
+## 12. What comes next
 
 - **Silver** is not built. It will read bronze, cast each column to the type in
   `contracts/silver/<table>.yaml`, quarantine rows that fail, dedupe on `_file_hash`, and carry

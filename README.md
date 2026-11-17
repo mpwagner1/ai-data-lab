@@ -75,3 +75,35 @@ Source config (`config/sources/<source>.yaml`), supported formats, held files, l
 to add a reader: [docs/BRONZE.md](docs/BRONZE.md).
 Decision records: [0001 storage](docs/decisions/0001-bronze-parquet-storage.md) and
 [0002 formats](docs/decisions/0002-bronze-multi-format.md).
+
+## Azure Blob test files
+
+Test files can live in a private Azure Blob Storage container. A staging step downloads the blobs
+under one prefix into `data/landing/<source>/`, and bronze loads them as usual. Only read access is
+used.
+
+Sign in with your own account:
+
+```bash
+az login
+```
+
+Create a git-ignored `.env` in the project root. Each value is a 1Password reference; use your own
+vault, item and field names:
+
+```dotenv
+AZURE_STORAGE_ACCOUNT=op://<vault>/<item>/<field>
+AZURE_STORAGE_CONTAINER=op://<vault>/<item>/<field>
+```
+
+Stage the blobs under the `orders/` prefix, then load them:
+
+```bash
+op run --env-file=.env -- uv run python -m ingestion.azure_stage orders orders/
+uv run python -m ingestion.bronze orders
+```
+
+Your user needs the `Storage Blob Data Reader` role on the test container only
+([SECURITY](docs/SECURITY.md)). Flags, caps, exit codes and log events:
+[BRONZE.md section 10](docs/BRONZE.md#10-reading-test-files-from-azure-blob-storage). Decision:
+[ADR 0003](docs/decisions/0003-azure-blob-source.md).
