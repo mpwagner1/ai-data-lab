@@ -41,6 +41,7 @@ uv run pytest
 
 - Work on a branch and open a PR; never push to `main`.
 - Never commit secrets (`.env` is git-ignored) or row-level data.
+- Agent work is planned and routed by the court-of-owls plugin; plans and the dispatch log live in `docs/plans/`.
 
 ## Bronze ingestion
 
