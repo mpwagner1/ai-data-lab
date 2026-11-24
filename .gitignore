@@ -39,3 +39,5 @@ tmp*/
 /data/
 
 # Local hook state
+# The court-of-owls plugin's notify hook writes here.
+.claude/.notify-state/
