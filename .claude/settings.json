@@ -35,7 +35,12 @@
       "Bash(gh issue create *)",
       "Bash(gh issue view *)",
       "Bash(gh issue list *)",
-      "Bash(gh issue comment *)"
+      "Bash(gh issue comment *)",
+      "Bash(az boards work-item create *)",
+      "Bash(az boards work-item show *)",
+      "Bash(az boards work-item update *)",
+      "Bash(az boards query *)",
+      "Bash(az devops project show *)"
     ],
     "deny": [
       "Bash(git push --force *)",
