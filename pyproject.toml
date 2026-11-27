@@ -22,6 +22,9 @@ build-backend = "hatchling.build"
 packages = ["src/ingestion"]
 
 [dependency-groups]
+ci = [
+    "zizmor==1.32.0",
+]
 dev = [
     "openpyxl>=3.1.5",
     "pre-commit>=4.7.0",
