@@ -1,3 +1,6 @@
+import subprocess
+import sys
+import textwrap
 import zipfile
 from collections.abc import Callable
 from io import BytesIO
@@ -57,6 +60,20 @@ def _build_ods(rows: list[list[str | tuple[str, str]]], sheet: str = "S") -> byt
         archive.writestr("content.xml", content)
         archive.writestr("META-INF/manifest.xml", _ODS_MANIFEST)
     return buffer.getvalue()
+
+
+def _run_python(code: str, *args: object) -> int:
+    command = [sys.executable, "-c", textwrap.dedent(code), *map(str, args)]
+    return subprocess.run(command, check=False, timeout=60).returncode
+
+
+@pytest.fixture
+def run_python() -> Callable[..., int]:
+    """Run code in a second Python process and return its exit code.
+
+    For cases that need another run, or a run that stops with `os._exit` (no cleanup happens).
+    """
+    return _run_python
 
 
 @pytest.fixture

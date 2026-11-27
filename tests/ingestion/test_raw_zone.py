@@ -1,12 +1,14 @@
 import logging
+import os
 import zipfile
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
 import pytest
 
-from ingestion import bronze
+from ingestion import bronze, raw_zone
 from ingestion.bronze import FileHeld, ingest_file, main, receive_raw
 from ingestion.detect import FileFormat, detect_format
 from ingestion.metadata import hash_file
@@ -579,3 +581,61 @@ def test_ingest_file_given_a_symlink_path_follows_it_today(project: Path) -> Non
     frame = pl.read_parquet(_bronze_files(project)[0])
     assert frame["_file_name"].to_list() == ["link.csv"]
     assert _raw_files(project) == []  # ingest_file never touches the raw zone
+
+
+@pytest.mark.parametrize("name", ["export.tmp", "export.TMP"])
+def test_rerun_over_a_tmp_named_landing_file_succeeds(project: Path, name: str) -> None:
+    (_landing(project) / name).write_text('{"id": "1"}\n{"id": "2"}\n')
+    assert main(["demo"]) == 0
+
+    assert main(["demo"]) == 0
+
+
+@pytest.mark.parametrize("name", ["export.tmp", "export.TMP"])
+def test_tmp_named_landing_file_is_received_once(project: Path, name: str) -> None:
+    path = _landing(project) / name
+    path.write_bytes(b"synthetic")
+    digest = hash_file(path)
+    receive_raw(path, "demo", project / "lake", digest, RUN_AT)
+
+    again = receive_raw(path, "demo", project / "lake", digest, RUN_AT + timedelta(days=1))
+
+    assert again is False
+    assert len(_raw_files(project)) == 1
+
+
+# A second writer of the same target that stops after a few bytes.
+_PARTIAL_PUBLISH = """
+    import os, sys
+    from pathlib import Path
+    from ingestion import raw_zone
+
+    def write(temp):
+        temp.write_bytes(b"id")
+        os._exit(9)
+
+    raw_zone.publish(Path(sys.argv[1]), write)
+"""
+
+
+def test_raw_copy_stays_complete_when_another_writer_stops_partway(
+    project: Path, monkeypatch: pytest.MonkeyPatch, run_python: Callable[..., int]
+) -> None:
+    path = _landing(project) / "a.csv"
+    path.write_text("id\n1\n2\n3\n")
+    digest = hash_file(path)
+    real_link = os.link
+    exit_codes: list[int] = []
+
+    def link_after_second_writer(source: Path, target: Path) -> None:
+        # The first writer's temp file is verified; the second one runs before the link.
+        exit_codes.append(run_python(_PARTIAL_PUBLISH, target))
+        real_link(source, target)
+
+    monkeypatch.setattr(raw_zone.os, "link", link_after_second_writer)
+
+    receive_raw(path, "demo", project / "lake", digest, RUN_AT)
+
+    stored = project / "lake" / "raw" / "demo" / "receive_date=2026-01-02" / f"{digest}.csv"
+    assert exit_codes == [9]
+    assert hash_file(stored) == digest

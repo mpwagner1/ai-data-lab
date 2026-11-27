@@ -3,7 +3,7 @@
 import hashlib
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +12,7 @@ from azure.core.exceptions import AzureError, ClientAuthenticationError
 from azure.identity import CredentialUnavailableError
 from azure.storage.blob import BlobPrefix
 
-from ingestion import azure_stage
+from ingestion import azure_stage, bronze
 from ingestion.azure_stage import BlobInfo, StageSummary
 
 SECRET_CONTENT = b"id,name\n1,SECRET-CONTENT-ROW\n"
@@ -1633,3 +1633,91 @@ def test_help_documents_the_total_cap(capsys: pytest.CaptureFixture[str]) -> Non
         azure_stage.main(["--help"])
 
     assert "--max-total-mib" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Interrupted runs and leftovers at the temp name
+# ---------------------------------------------------------------------------
+
+# A staging run that stops mid-download, after the first part has reached the disk.
+_STOP_MID_DOWNLOAD = """
+    import os, sys
+    from pathlib import Path
+    from ingestion import azure_stage
+    from ingestion.azure_stage import BlobInfo
+
+    class Stops:
+        def list_blobs(self, prefix):
+            yield BlobInfo("demo/events.ndjson", size=24)
+
+        def read_blob(self, name):
+            yield b'{"id": "1"}\\n{"id": "2"}\\n' * 20000
+            os._exit(9)
+
+    azure_stage.stage(Stops(), "demo", "demo/", Path(sys.argv[1]))
+"""
+
+# A staging run that stops right after the target is linked, before any cleanup.
+_STOP_AFTER_LINK = """
+    import os, sys
+    from pathlib import Path
+    from ingestion import azure_stage
+    from ingestion.azure_stage import BlobInfo
+
+    class One:
+        def list_blobs(self, prefix):
+            yield BlobInfo("demo/a.csv", size=8)
+
+        def read_blob(self, name):
+            yield b"id\\nORIG\\n"
+
+    real_link = os.link
+
+    def link_then_stop(source, target):
+        real_link(source, target)
+        os._exit(9)
+
+    os.link = link_then_stop
+    azure_stage.stage(One(), "demo", "demo/", Path(sys.argv[1]))
+"""
+
+
+def test_bronze_loads_nothing_from_a_staging_run_stopped_mid_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_python: Callable[..., int]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    landing = tmp_path / "data" / "landing"
+    assert run_python(_STOP_MID_DOWNLOAD, landing) == 9
+
+    bronze.main(["demo"])
+
+    lake = tmp_path / "lake"
+    assert list(lake.glob("bronze/demo/ingest_date=*/*.parquet")) == []
+    assert list(lake.glob("raw/demo/receive_date=*/*")) == []
+
+
+def test_staging_after_a_run_stopped_after_linking_keeps_the_landing_file(
+    tmp_path: Path, run_python: Callable[..., int]
+) -> None:
+    assert run_python(_STOP_AFTER_LINK, tmp_path) == 9
+    target = tmp_path / "demo" / "a.csv"
+    assert target.read_bytes() == b"id\nORIG\n"
+
+    summary = azure_stage.stage(
+        FakeContainer({"demo/a.csv": b"id\nNEW!\n"}), "demo", "demo/", tmp_path
+    )
+
+    assert target.read_bytes() == b"id\nORIG\n"
+    assert summary == StageSummary(failed=1)
+
+
+def test_staging_does_not_write_through_a_symlink_at_the_temp_name(tmp_path: Path) -> None:
+    folder = tmp_path / "orders"
+    folder.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"keep me")
+    (folder / "a.csv.tmp").symlink_to(outside)
+
+    _run(FakeContainer({"orders/a.csv": b"id\n1\n"}), tmp_path)
+
+    assert outside.read_bytes() == b"keep me"
