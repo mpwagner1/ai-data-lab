@@ -1,0 +1,160 @@
+# Risk register: every suppressed finding or ignored advisory, with why, who and until when.
+# Checked by tests/test_risk_register.py. One entry per file + kind + rule.
+#
+#   count      exact number of occurrences; adding or removing one fails the test
+#   max_count  allows 0 up to this number; only for a suppression that is still in an open PR
+#   expires    unquoted YYYY-MM-DD; the test fails from the day after
+#
+# When an entry expires, remove the suppression or review the reason and set a new date.
+
+[[entry]]
+file = ".sqlfluff"
+kind = "sqlfluff-exclude-rules"
+rule = "LT05"
+count = 1
+reason = "Line-length rule switched off in the initial scaffold (1f27bcd); no reason was recorded. No .sql files are tracked yet, so it hides nothing today. Review when the first SQL model lands."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = ".github/workflows/claude.yml"
+kind = "zizmor-ignore"
+rule = "dangerous-triggers"
+max_count = 1
+reason = "Added by PR #149 on the issue_comment trigger. There the job `if` requires an OWNER, MEMBER or COLLABORATOR author, and the workflow comment states the action refuses actors without write access. Change to count = 1 once #149 merges."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+# Broad exception catches. BLE is not in the selected ruff rules, so these comments have no
+# effect on today's gate; they mark catches that are broad on purpose.
+
+[[entry]]
+file = "src/ingestion/archive_ingest.py"
+kind = "noqa"
+rule = "BLE001"
+count = 2
+reason = "Per-item boundaries: one bad archive member must not stop the others (counted as failed), and the pending listing reports an unreadable archive. Both keep only the error type."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = "src/ingestion/azure_stage.py"
+kind = "noqa"
+rule = "BLE001"
+count = 1
+reason = "One bad blob must not stop the rest. It is reported as failed with the error type only, because the message can carry paths or library details."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = "src/ingestion/bronze.py"
+kind = "noqa"
+rule = "BLE001"
+count = 1
+reason = "One bad file must not stop the run. It is counted as failed, logged by error type, and the command exits 1."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = "src/ingestion/bronze_cli.py"
+kind = "noqa"
+rule = "BLE001"
+count = 1
+reason = "The pending listing reports a file that fails as failed, by error type, instead of stopping the listing."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = "src/ingestion/pending.py"
+kind = "noqa"
+rule = "BLE001"
+count = 1
+reason = "The dry-run load turns any error into a failed outcome that carries only the error type."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = "tests/ingestion/test_error_context.py"
+kind = "noqa"
+rule = "B017"
+count = 1
+reason = "pytest.raises(Exception) on purpose: the parametrized cases raise different types, and the test checks that none keeps a context, a cause or the secret."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+# Type ignores in tests. No type checker is configured in this project, so these have no effect
+# on today's gate; each marks a deliberate type mismatch.
+
+[[entry]]
+file = "tests/ingestion/test_archives.py"
+kind = "type-ignore"
+rule = "arg-type"
+count = 2
+reason = "A spy forwards `*args: object` to the real ingest_file, and a fake endless reader is passed where a binary stream is expected."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = "tests/ingestion/test_azure_stage.py"
+kind = "type-ignore"
+rule = "arg-type"
+count = 9
+reason = "Fake containers and fake Azure SDK clients are passed where the real types are expected, so no test touches Azure."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = "tests/ingestion/test_azure_stage.py"
+kind = "type-ignore"
+rule = "return-value"
+count = 1
+reason = "The test helper's factory lambda returns a container typed as `object`."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = "tests/ingestion/test_excel_reader.py"
+kind = "type-ignore"
+rule = "arg-type"
+count = 1
+reason = "Passes wrong header_row types on purpose to test that they are rejected."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = "tests/ingestion/test_pending.py"
+kind = "type-ignore"
+rule = "index"
+count = 2
+reason = "Indexes a re.search result that is typed as optional; the log lines selected are expected to match, and the test errors if one does not."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = "tests/ingestion/test_raw_zone.py"
+kind = "type-ignore"
+rule = "arg-type"
+count = 1
+reason = "A spy forwards `*args: object` to the real receive_raw."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+# Runtime test skips.
+
+[[entry]]
+file = "tests/ingestion/test_pending.py"
+kind = "pytest-skip"
+rule = "skip"
+count = 2
+reason = "The locked-file fixture needs chmod 000 to deny reads; it cannot on non-POSIX systems or as root, so those tests skip there."
+owner = "mpwagner1"
+expires = 2027-05-27
+
+[[entry]]
+file = "tests/ingestion/test_three_gaps.py"
+kind = "pytest-skip"
+rule = "skip"
+count = 2
+reason = "The locked-folder fixture needs chmod 000 to deny listing; it cannot on non-POSIX systems or as root, so those tests skip there."
+owner = "mpwagner1"
+expires = 2027-05-27
