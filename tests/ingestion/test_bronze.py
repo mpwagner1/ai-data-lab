@@ -332,6 +332,27 @@ def test_no_stale_temp_warning_when_clean(
     assert "bronze_stale_temp" not in caplog.text
 
 
+def test_temp_file_left_by_publish_is_reported_as_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / "data" / "landing" / "orders").mkdir(parents=True)
+    partition = tmp_path / "lake" / "bronze" / "orders" / "ingest_date=2026-11-10"
+    names: list[str] = []
+
+    def record_name(source: Path, target: Path) -> None:
+        names.append(source.name)
+
+    monkeypatch.setattr(raw_zone.os, "link", record_name)
+    raw_zone.publish(partition / "a.parquet", lambda temp: temp.write_bytes(b"x"))
+    (partition / names[0]).write_bytes(b"left behind")
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["orders"]) == 0
+
+    assert names[0].startswith(".")
+    assert names[0] in caplog.text
+
+
 def test_link_collision_removes_temp_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_link(src: Path, dst: Path) -> None:
         raise FileExistsError(dst)

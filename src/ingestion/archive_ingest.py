@@ -26,6 +26,7 @@ from ingestion.archives import (
 )
 from ingestion.detect import FileFormat
 from ingestion.pending import REASON_FAILED, Outcome, log_pending, outcome_once
+from ingestion.raw_zone import raw_copy_path
 from ingestion.source_config import SourceConfig
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,7 @@ def _ingest_unit(
 
 def ingest_archive(
     path: Path,
+    file_hash: str,
     file_format: FileFormat,
     source: str,
     lake_root: Path,
@@ -108,10 +110,15 @@ def ingest_archive(
     config: SourceConfig,
     delimiter: str | None,
 ) -> ArchiveOutcome:
-    """Load every member of an archive that was already received into the raw zone."""
+    """Load every member of an archive that was already received into the raw zone.
+
+    Members are expanded from the raw copy stored under `file_hash`, so they always come from
+    received bytes. `path` is the landing file; it supplies the name in `_file_name` and logs.
+    """
     outcome = ArchiveOutcome()
     counts = ArchiveCounts()
-    units = expand_archive(path, file_format is FileFormat.GZIP, counts)
+    stored = raw_copy_path(lake_root, source, file_hash)
+    units = expand_archive(stored, file_format is FileFormat.GZIP, counts, name=path.name)
     try:
         with closing(units):
             for unit in units:

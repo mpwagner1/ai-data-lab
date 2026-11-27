@@ -802,7 +802,7 @@ def test_stale_temp_file_from_a_crash_does_not_block_staging(tmp_path: Path) -> 
 
     assert summary.staged == 1
     assert (folder / "a.csv").read_bytes() == b"fresh"
-    assert _files(folder) == ["a.csv"]
+    assert _files(folder) == ["a.csv", "a.csv.tmp"]  # the leftover is not this run's to remove
 
 
 def test_staged_file_bytes_equal_blob_bytes_across_chunk_boundaries(tmp_path: Path) -> None:
