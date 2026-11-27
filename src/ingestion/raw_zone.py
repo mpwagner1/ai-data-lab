@@ -24,8 +24,9 @@ def publish(target: Path, write: Callable[[Path], object]) -> None:
     """Write to a temp file, then link it to `target`; fails if `target` exists.
 
     The temp name is hidden and unique per call, and is created exclusively, so an existing path
-    is never followed or truncated. A crash leaves only a `.tmp` file, which the skip checks,
-    readers and the landing scan ignore.
+    is never followed or truncated. A run that stops early can leave that temp file behind (next
+    to `target` if it was already linked). The skip checks ignore it by its `.tmp` suffix and the
+    landing scan because it is hidden.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_name(f".{secrets.token_hex(8)}{target.suffix}.tmp")

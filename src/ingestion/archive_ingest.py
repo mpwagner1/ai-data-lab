@@ -25,6 +25,7 @@ from ingestion.archives import (
     expand_archive,
 )
 from ingestion.detect import FileFormat
+from ingestion.metadata import hash_file
 from ingestion.pending import REASON_FAILED, Outcome, log_pending, outcome_once
 from ingestion.raw_zone import raw_copy_path
 from ingestion.source_config import SourceConfig
@@ -114,10 +115,13 @@ def ingest_archive(
 
     Members are expanded from the raw copy stored under `file_hash`, so they always come from
     received bytes. `path` is the landing file; it supplies the name in `_file_name` and logs.
+    Raises RuntimeError if the raw copy no longer matches `file_hash`.
     """
     outcome = ArchiveOutcome()
     counts = ArchiveCounts()
     stored = raw_copy_path(lake_root, source, file_hash)
+    if hash_file(stored) != file_hash:
+        raise RuntimeError(f"raw copy does not match its hash: {path.name}")
     units = expand_archive(stored, file_format is FileFormat.GZIP, counts, name=path.name)
     try:
         with closing(units):

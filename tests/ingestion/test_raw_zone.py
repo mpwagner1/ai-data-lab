@@ -2,6 +2,7 @@ import logging
 import os
 import zipfile
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -639,3 +640,40 @@ def test_raw_copy_stays_complete_when_another_writer_stops_partway(
     stored = project / "lake" / "raw" / "demo" / "receive_date=2026-01-02" / f"{digest}.csv"
     assert exit_codes == [9]
     assert hash_file(stored) == digest
+
+
+def test_unlistable_raw_partition_raises_and_writes_no_second_copy(
+    project: Path, unlistable: Callable[[Path], AbstractContextManager[None]]
+) -> None:
+    path = _landing(project) / "a.csv"
+    path.write_text("id\n1\n")
+    digest = hash_file(path)
+    receive_raw(path, "demo", project / "lake", digest, RUN_AT)
+    [first] = _raw_files(project)
+
+    with unlistable(first.parent), pytest.raises(PermissionError):
+        receive_raw(path, "demo", project / "lake", digest, RUN_AT + timedelta(days=1))
+
+    assert _raw_files(project) == [first]
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink"])
+def test_publish_leaves_an_existing_temp_path_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setattr(raw_zone.secrets, "token_hex", lambda size: "fixed")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"keep me")
+    temp = tmp_path / ".fixed.csv.tmp"
+    if kind == "file":
+        temp.write_bytes(b"keep me")
+    else:
+        temp.symlink_to(outside)
+
+    with pytest.raises(FileExistsError):
+        raw_zone.publish(tmp_path / "a.csv", lambda path: path.write_bytes(b"new"))
+
+    assert temp.is_symlink() is (kind == "symlink")
+    assert temp.read_bytes() == b"keep me"
+    assert outside.read_bytes() == b"keep me"
+    assert not (tmp_path / "a.csv").exists()

@@ -1,6 +1,7 @@
-import contextlib
 import logging
 import re
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -462,16 +463,13 @@ def test_unquoted_empty_is_null_quoted_empty_is_empty_string_and_spaces_kept(
     assert frame.schema["name"] == pl.String
 
 
-def test_unlistable_partition_does_not_lead_to_a_second_load(tmp_path: Path) -> None:
+def test_unlistable_partition_does_not_lead_to_a_second_load(
+    tmp_path: Path, unlistable: Callable[[Path], AbstractContextManager[None]]
+) -> None:
     ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT)
     [first] = _parquet_files(tmp_path)
-    first.parent.chmod(0o000)
 
-    try:
-        # Raising is acceptable here, and so is skipping; writing a second copy is not.
-        with contextlib.suppress(PermissionError):
-            ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT + timedelta(days=1))
-    finally:
-        first.parent.chmod(0o755)
+    with unlistable(first.parent), pytest.raises(PermissionError):
+        ingest_csv(ORDERS, "orders", tmp_path, run_at=RUN_AT + timedelta(days=1))
 
     assert _parquet_files(tmp_path) == [first]

@@ -21,6 +21,7 @@ import pytest
 from ingestion import archives, bronze
 from ingestion.archives import ArchiveReadError, expand_archive
 from ingestion.bronze import main
+from ingestion.metadata import hash_file
 
 SECRET_NAME = "SECRETMEMBERNAME"
 SECRET_TEXT = "SECRETCONTENT"
@@ -862,6 +863,19 @@ def test_archive_replaced_after_receive_loads_no_replacement_rows(
 
     main(["demo"])
 
-    frame = _frames(project)
-    loaded = frame["id"].to_list() if "id" in frame.columns else []
-    assert "replaced" not in loaded
+    assert _frames(project)["id"].to_list() == ["received"]
+
+
+def test_archive_with_a_mismatched_raw_copy_fails_and_loads_nothing(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = _landing(project) / "a.zip"
+    _zip_of_value(path, "landing")
+    partition = project / "lake" / "raw" / "demo" / "receive_date=2026-01-01"
+    partition.mkdir(parents=True)
+    _zip_of_value(partition / f"{hash_file(path)}.zip", "other")
+
+    assert main(["demo"]) == 1
+
+    assert _bronze_count(project) == 0
+    assert 'error="RuntimeError"' in caplog.text

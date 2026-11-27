@@ -1,9 +1,12 @@
+import os
 import subprocess
 import sys
 import textwrap
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from io import BytesIO
+from pathlib import Path
 from xml.sax.saxutils import escape
 
 import pytest
@@ -74,6 +77,25 @@ def run_python() -> Callable[..., int]:
     For cases that need another run, or a run that stops with `os._exit` (no cleanup happens).
     """
     return _run_python
+
+
+@contextmanager
+def _unlistable(folder: Path) -> Iterator[None]:
+    if os.name != "posix" or os.geteuid() == 0:
+        pytest.skip("chmod 000 does not deny listing on this platform or as root")
+    folder.chmod(0)
+    try:
+        if os.access(folder, os.R_OK):
+            pytest.skip("chmod 000 does not deny listing here")
+        yield
+    finally:
+        folder.chmod(0o755)
+
+
+@pytest.fixture
+def unlistable() -> Callable[[Path], AbstractContextManager[None]]:
+    """Make a folder unlistable inside a `with` block; skip where chmod cannot do that."""
+    return _unlistable
 
 
 @pytest.fixture
