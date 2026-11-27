@@ -32,13 +32,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install locked dependencies
-        run: uv sync --locked
+        run: uv sync --locked --no-install-project
 
       - name: Lint
-        run: uv run --locked ruff check .
+        run: uv run --no-sync ruff check .
 
       - name: Check formatting
-        run: uv run --locked ruff format --check .
+        run: uv run --no-sync ruff format --check .
 
   sqlfluff:
     name: sqlfluff
@@ -58,7 +58,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install locked dependencies
-        run: uv sync --locked
+        run: uv sync --locked --no-install-project
 
       - name: Lint tracked SQL files
         run: |
@@ -68,7 +68,7 @@ jobs:
             echo "result=skipped reason=no_sql_files"
             exit 0
           fi
-          git ls-files -z -- '*.sql' | xargs -0 uv run --locked sqlfluff lint
+          git ls-files -z -- '*.sql' | xargs -0 uv run --no-sync sqlfluff lint
 
   pytest:
     name: pytest
