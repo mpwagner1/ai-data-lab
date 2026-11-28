@@ -9,8 +9,10 @@ starts with the file's hash. An unusable lake entry for a hash fails that file (
 `lake_entries.py`). See docs/decisions/0001-bronze-parquet-storage.md and 0002.
 """
 
+import glob
 import json
 import logging
+import os
 import secrets
 import sys
 import time
@@ -213,7 +215,8 @@ def _elapsed(started: float) -> float:
 
 
 def _publish_new_file(frame: pl.DataFrame, target: Path) -> None:
-    publish(target, frame.write_parquet)
+    # Absolute: the library takes the path as written.
+    publish(target, lambda temp: frame.write_parquet(temp.absolute()))
 
 
 def _warn_stale_temp_files(source: str, source_dir: Path) -> None:
@@ -308,10 +311,24 @@ def ingest_file(
     return IngestResult(log_name, file_hash, frame.height, skipped=False)
 
 
+def _bronze_pattern(source: str, lake_root: Path) -> str:
+    """The DuckDB pattern for a source: the folder is literal, only the tail has wildcards."""
+    if os.sep != "\\" and "\\" in str(lake_root):
+        raise ValueError("lake root cannot contain a backslash")
+    if str(lake_root).startswith("~"):
+        lake_root = lake_root.absolute()
+    folder = glob.escape(str(_source_dir(lake_root, source)))
+    return str(Path(folder) / "**" / "*.parquet")
+
+
 def read_bronze(source: str, lake_root: Path) -> duckdb.DuckDBPyRelation:
-    """Return a DuckDB relation over every bronze file of a source (missing columns are null)."""
+    """Return a DuckDB relation over every bronze file of a source (missing columns are null).
+
+    `lake_root` is used as written. Raises ValueError for a root with a backslash where that is
+    not the path separator, because DuckDB cannot be given such a path.
+    """
     _validate_source(source)
-    pattern = str(_source_dir(lake_root, source) / "**" / "*.parquet")
+    pattern = _bronze_pattern(source, lake_root)
     return duckdb.sql(
         "select * from read_parquet(?, hive_partitioning = true, union_by_name = true)",
         params=[pattern],

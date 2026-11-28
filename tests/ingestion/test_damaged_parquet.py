@@ -80,7 +80,7 @@ def test_conversion_step_is_covered_too(tmp_path: Path, monkeypatch: pytest.Monk
 def test_reader_lets_interrupts_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupt: type[BaseException]
 ) -> None:
-    def stop(source: object) -> None:
+    def stop(source: object, **options: object) -> None:
         raise interrupt
 
     monkeypatch.setattr(parquet_reader.pl, "read_parquet", stop)

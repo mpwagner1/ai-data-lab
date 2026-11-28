@@ -157,7 +157,8 @@ def read_parquet_as_strings(path: Path, config: SourceConfig, flag: str | None) 
     starting with `_`, or has a type that cannot be converted. `config` and `flag` do not apply.
     The error carries no `__context__` or `__cause__`.
     """
-    frame, problem = _guarded(lambda: pl.read_parquet(path))
+    # Absolute and `glob=False`: the library takes the path as written.
+    frame, problem = _guarded(lambda: pl.read_parquet(path.absolute(), glob=False))
     if frame is None:
         raise _fail(path, problem or "unreadable")
     if frame.width == 0:

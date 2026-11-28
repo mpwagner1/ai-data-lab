@@ -165,7 +165,8 @@ def _check_decoded(raw: bytes, text: str, encoding: str) -> None:
 def _scan(path: Path, separator: str, encoding: str) -> pl.LazyFrame:
     if encoding.lower().replace("_", "-") in {"utf-8", "utf8"}:
         _check_utf8(path)
-        return pl.scan_csv(path, separator=separator, infer_schema=False)
+        # Absolute and `glob=False`: the library takes the path as written.
+        return pl.scan_csv(path.absolute(), separator=separator, infer_schema=False, glob=False)
     # Polars only reads UTF-8, so decode other encodings first (in memory, not lazy).
     raw = path.read_bytes()
     text = raw.decode(encoding)
