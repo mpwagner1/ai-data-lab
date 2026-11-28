@@ -20,8 +20,8 @@ expires = 2027-05-27
 file = ".github/workflows/claude.yml"
 kind = "zizmor-ignore"
 rule = "dangerous-triggers"
-max_count = 1
-reason = "Added by PR #149 on the issue_comment trigger. There the job `if` requires an OWNER, MEMBER or COLLABORATOR author, and the workflow comment states the action refuses actors without write access. Change to count = 1 once #149 merges."
+count = 1
+reason = "Added by PR #149 on the issue_comment trigger. There the job `if` requires an OWNER, MEMBER or COLLABORATOR author, and the workflow comment states the action refuses actors without write access."
 owner = "mpwagner1"
 expires = 2027-05-27
 
@@ -140,6 +140,15 @@ owner = "mpwagner1"
 expires = 2027-05-27
 
 # Runtime test skips.
+
+[[entry]]
+file = "tests/conftest.py"
+kind = "pytest-skip"
+rule = "skip"
+count = 2
+reason = "The shared unlistable-folder helper needs chmod 000 to deny listing; it cannot on non-POSIX systems or as root, or where the folder stays readable, so tests using it skip there."
+owner = "mpwagner1"
+expires = 2027-05-27
 
 [[entry]]
 file = "tests/ingestion/test_pending.py"
