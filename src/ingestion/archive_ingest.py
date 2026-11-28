@@ -25,8 +25,14 @@ from ingestion.archives import (
     expand_archive,
 )
 from ingestion.detect import FileFormat
-from ingestion.metadata import hash_file
-from ingestion.pending import REASON_FAILED, Outcome, log_pending, outcome_once
+from ingestion.lake_entries import BadLakeEntryError, error_fields
+from ingestion.pending import (
+    REASON_FAILED,
+    Outcome,
+    failed_outcome,
+    log_pending,
+    outcome_once,
+)
 from ingestion.raw_zone import raw_copy_path
 from ingestion.source_config import SourceConfig
 
@@ -94,7 +100,7 @@ def _ingest_unit(
         return
     except Exception as error:  # noqa: BLE001 - one bad member must not stop the others
         outcome.failed += 1
-        bronze._log("bronze_error", source=source, file_name=log_name, error=type(error).__name__)
+        bronze._log("bronze_error", source=source, file_name=log_name, **error_fields(error))
         return
     outcome.skipped += result.skipped
     outcome.written += not result.skipped
@@ -115,13 +121,11 @@ def ingest_archive(
 
     Members are expanded from the raw copy stored under `file_hash`, so they always come from
     received bytes. `path` is the landing file; it supplies the name in `_file_name` and logs.
-    Raises RuntimeError if the raw copy no longer matches `file_hash`.
+    Raises BadLakeEntryError if a raw entry for `file_hash` is unusable.
     """
     outcome = ArchiveOutcome()
     counts = ArchiveCounts()
-    stored = raw_copy_path(lake_root, source, file_hash)
-    if hash_file(stored) != file_hash:
-        raise RuntimeError(f"raw copy does not match its hash: {path.name}")
+    stored = raw_copy_path(lake_root, source, file_hash)  # checks the copy's hash
     units = expand_archive(stored, file_format is FileFormat.GZIP, counts, name=path.name)
     try:
         with closing(units):
@@ -160,7 +164,13 @@ def list_pending_members(
     try:
         with closing(units):
             for unit in units:
-                if bronze._already_ingested(source_dir, unit.file_hash):
+                try:
+                    if bronze._already_ingested(source_dir, unit.file_hash):
+                        continue
+                except BadLakeEntryError as error:  # a real run fails this member only
+                    count += 1
+                    failed = failed_outcome(error)
+                    log_pending(source, path.name, unit.file_hash, failed, member=unit.index)
                     continue
                 count += 1
                 outcome = outcome_once(seen, unit.path, unit.file_hash, config, delimiter)

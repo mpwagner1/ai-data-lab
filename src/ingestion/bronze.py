@@ -5,7 +5,8 @@ Bronze: `<lake_root>/bronze/<source>/ingest_date=YYYY-MM-DD/<file_hash><run_ts>_
 `<suffix>` is 8 random hex chars so two loads in the same second never collide.
 A file with no reader, missing config or an unusable encoding is held (pending): it stays in the
 raw zone, `bronze_unparsed` is logged and the run exits 3. Pending is derived: no bronze file
-starts with the file's hash. See docs/decisions/0001-bronze-parquet-storage.md and 0002.
+starts with the file's hash. An unusable lake entry for a hash fails that file (see
+`lake_entries.py`). See docs/decisions/0001-bronze-parquet-storage.md and 0002.
 """
 
 import json
@@ -25,6 +26,7 @@ from ingestion.csv_reader import DEFAULT_SEPARATOR, read_csv_as_strings
 from ingestion.detect import FileFormat, detect_format, validate_format
 from ingestion.excel_reader import read_workbook
 from ingestion.json_reader import read_json, read_ndjson
+from ingestion.lake_entries import error_fields, parquet_problem, usable_entries
 from ingestion.metadata import hash_file, with_metadata
 from ingestion.parquet_reader import read_parquet_as_strings
 from ingestion.parsed import ParsedPart
@@ -100,10 +102,13 @@ def _source_dir(lake_root: Path, source: str) -> Path:
 
 
 def _already_ingested(source_dir: Path, file_hash: str) -> bool:
-    return any(
-        p.name.startswith(file_hash) and p.name.endswith(".parquet")
+    """True if bronze holds this hash; BadLakeEntryError if any entry for it is unusable."""
+    matches = (
+        p
         for p in partition_files(source_dir, "ingest_date")
+        if p.name.startswith(file_hash) and p.name.endswith(".parquet")
     )
+    return bool(usable_entries("bronze", file_hash, matches, parquet_problem))
 
 
 def _target_path(source_dir: Path, file_hash: str, run_at: datetime) -> Path:
@@ -250,6 +255,8 @@ def ingest_file(
 ) -> IngestResult:
     """Load one file into bronze; skip it if its hash was already loaded unless `force`.
 
+    An unusable bronze entry for the hash raises BadLakeEntryError, with or without `force`.
+
     A header-only file is written as a zero-row Parquet file so later runs skip it too.
 
     `config` holds per-source settings (defaults if None). `delimiter` is the --delimiter flag
@@ -274,7 +281,8 @@ def ingest_file(
     source_dir = _source_dir(lake_root, source)
     config = config or SourceConfig()
     file_hash = file_hash or hash_file(path)
-    if not force and _already_ingested(source_dir, file_hash):
+    loaded = _already_ingested(source_dir, file_hash)  # checked even with `force`
+    if loaded and not force:
         _log(
             "bronze_skip",
             source=source,
@@ -337,7 +345,8 @@ def ingest_landing(
     counted as pending (`bronze_unparsed` is logged with a reason). Returns the counts.
 
     One bad file does not stop the rest. Failures are logged with the error type and
-    file name only (messages can carry values, so they are not logged).
+    file name only (messages can carry values, so they are not logged); a BadLakeEntryError
+    also logs which lake entries are unusable.
     Raises FileNotFoundError if the landing folder is missing.
     """
     from ingestion.archive_ingest import ARCHIVE_FORMATS, ingest_archive  # avoids a cycle
@@ -404,7 +413,7 @@ def ingest_landing(
             continue
         except Exception as error:  # noqa: BLE001 - keep going; reported via exit code
             failed += 1
-            _log("bronze_error", source=source, file_name=path.name, error=type(error).__name__)
+            _log("bronze_error", source=source, file_name=path.name, **error_fields(error))
             continue
         skipped += result.skipped
         written += not result.skipped

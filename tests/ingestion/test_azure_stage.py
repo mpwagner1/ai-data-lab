@@ -12,7 +12,7 @@ from azure.core.exceptions import AzureError, ClientAuthenticationError
 from azure.identity import CredentialUnavailableError
 from azure.storage.blob import BlobPrefix
 
-from ingestion import azure_stage, bronze
+from ingestion import azure_stage, bronze, raw_zone
 from ingestion.azure_stage import BlobInfo, StageSummary
 
 SECRET_CONTENT = b"id,name\n1,SECRET-CONTENT-ROW\n"
@@ -1721,3 +1721,25 @@ def test_staging_does_not_write_through_a_symlink_at_the_temp_name(tmp_path: Pat
     _run(FakeContainer({"orders/a.csv": b"id\n1\n"}), tmp_path)
 
     assert outside.read_bytes() == b"keep me"
+
+
+def test_folder_sync_failure_fails_the_blob_and_the_next_run_skips_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    container = FakeContainer({"orders/a.csv": b"id\n1\n"})
+    real_sync = raw_zone._sync
+
+    def sync(path: Path) -> None:
+        if path.is_dir():
+            raise OSError("synthetic sync failure")
+        real_sync(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(raw_zone, "_sync", sync)
+        first, folder = _run(container, tmp_path)
+
+    second, _ = _run(container, tmp_path)
+
+    assert (first.failed, first.staged) == (1, 0)
+    assert (second.failed, second.skipped) == (0, 1)
+    assert _files(folder) == ["a.csv"]
