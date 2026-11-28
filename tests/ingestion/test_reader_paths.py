@@ -158,6 +158,54 @@ def test_read_bronze_rejects_a_lake_root_with_a_backslash(project: Path) -> None
         bronze.read_bronze("demo", lake)
 
 
+def test_a_tilde_root_is_checked_after_it_is_made_absolute(
+    project: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _load_into(project / "a" / "b" / "~" / "lake", project / "other.csv", "sibling")
+    work = project / "a\\b"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    lake = Path("~/lake")
+    _load_into(lake, project / "own.csv", "own")
+
+    with pytest.raises(ValueError, match="backslash"):
+        bronze.read_bronze("demo", lake)
+
+
+def test_a_lake_root_starting_with_file_colon_is_a_folder(project: Path) -> None:
+    other = project / "other" / "lake"
+    _load_into(other, project / "other.csv", "sibling")
+    lake = Path(f"file:{other}")
+    _load_into(lake, project / "own.csv", "own")
+
+    assert _ids(lake) == ["own"]
+
+
+@pytest.mark.parametrize("root", ["~/lake", "file:lake/x", "file:/lake"])
+@pytest.mark.parametrize("folder", ["env=prod", "_file_name=x", "ingest_date=1999-01-01"])
+def test_a_root_made_absolute_is_refused_under_a_key_value_folder(
+    project: Path, home: Path, monkeypatch: pytest.MonkeyPatch, folder: str, root: str
+) -> None:
+    work = project / folder
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    with pytest.raises(ValueError, match="current directory"):
+        bronze.read_bronze("demo", Path(root))
+
+
+def test_a_plain_relative_root_works_under_a_key_value_folder(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work = project / "env=prod"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    _load_into(Path("lake"), project / "own.csv", "own")
+
+    assert _ids(Path("lake")) == ["own"]
+    assert "env" not in bronze.read_bronze("demo", Path("lake")).columns
+
+
 @pytest.mark.parametrize("stem", _NAMES)
 def test_staging_writes_each_blob_under_its_own_name(tmp_path: Path, stem: str) -> None:
     folder = tmp_path / "orders"

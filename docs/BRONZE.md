@@ -144,8 +144,10 @@ Every bronze file of the source is read with `union_by_name`, so files with diff
 load together and a column missing from a file comes back as null. `_sheet_name` is null for old
 files written before it existed.
 
-`lake_root` is used as written. A root with a backslash in a folder name is refused with
-`ValueError` (except on Windows, where it is the separator).
+`lake_root` names a folder as written. A root that starts with `~` or `file:` is made absolute
+under the current directory first. `read_bronze` raises `ValueError` if the resulting path has a
+backslash in a folder name (except on Windows, where it is the separator), or if such a root is
+used while the current directory has `=` in its path.
 
 ### Checking an existing lake
 

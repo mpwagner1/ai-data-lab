@@ -313,10 +313,15 @@ def ingest_file(
 
 def _bronze_pattern(source: str, lake_root: Path) -> str:
     """The DuckDB pattern for a source: the folder is literal, only the tail has wildcards."""
+    # DuckDB does not take these two starts as written, so such a root is made absolute.
+    if str(lake_root).lower().startswith(("~", "file:")):
+        # `key=value` folder names above the root would become columns.
+        if "=" in str(Path.cwd()):
+            raise ValueError("lake root cannot be used: `=` in the current directory")
+        lake_root = lake_root.absolute()
+    # Checked last, on the path DuckDB is given.
     if os.sep != "\\" and "\\" in str(lake_root):
         raise ValueError("lake root cannot contain a backslash")
-    if str(lake_root).startswith("~"):
-        lake_root = lake_root.absolute()
     folder = glob.escape(str(_source_dir(lake_root, source)))
     return str(Path(folder) / "**" / "*.parquet")
 
@@ -324,8 +329,10 @@ def _bronze_pattern(source: str, lake_root: Path) -> str:
 def read_bronze(source: str, lake_root: Path) -> duckdb.DuckDBPyRelation:
     """Return a DuckDB relation over every bronze file of a source (missing columns are null).
 
-    `lake_root` is used as written. Raises ValueError for a root with a backslash where that is
-    not the path separator, because DuckDB cannot be given such a path.
+    `lake_root` names a folder as written. A root that starts with `~` or `file:` is made absolute
+    under the current directory first. Raises ValueError if the resulting path has a backslash
+    where that is not the path separator, or if such a root is used while the current directory
+    has `=` in its path.
     """
     _validate_source(source)
     pattern = _bronze_pattern(source, lake_root)
