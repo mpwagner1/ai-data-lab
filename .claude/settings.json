@@ -65,7 +65,27 @@
       "Read(./.env)",
       "Read(./.env.*)",
       "Read(**/.env)",
-      "Read(**/.env.*)"
+      "Read(**/.env.*)",
+      "Edit(./.claude/settings.json)",
+      "Write(./.claude/settings.json)",
+      "Edit(./.claude/hooks/**)",
+      "Write(./.claude/hooks/**)",
+      "Read(~/.codex/**)",
+      "Bash(az boards work-item delete *)",
+      "Bash(az boards area *)",
+      "Bash(az boards iteration *)",
+      "Bash(az pipelines *)",
+      "Bash(az repos *)",
+      "Bash(az devops team *)",
+      "Bash(az devops admin *)",
+      "Bash(az devops security *)",
+      "Bash(az devops user *)",
+      "Bash(az devops extension *)",
+      "Bash(az devops service-endpoint *)",
+      "Bash(az devops project create *)",
+      "Bash(az devops project delete *)",
+      "Bash(az devops invoke *)",
+      "Bash(az rest *)"
     ]
   },
   "hooks": {
