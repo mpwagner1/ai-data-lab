@@ -2,7 +2,6 @@
 
 import io
 import logging
-import struct
 import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -11,6 +10,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from damaged_parquet import panicking_parquet
 from ingestion import bronze, lake_entries, raw_zone
 from ingestion.lake_entries import BadLakeEntryError, parquet_problem
 from ingestion.metadata import hash_file
@@ -215,24 +215,14 @@ def test_force_does_not_write_beside_an_unusable_member_entry(project: Path) -> 
     assert len(_entries(project, "bronze")) == 2  # the planted entry and the other member
 
 
-def _panicking_parquet() -> bytes:
-    """A small Parquet file with one footer byte changed so that Polars panics reading it."""
-    buffer = io.BytesIO()
-    pl.DataFrame({"id": ["1", "2"], "code": ["a", "b"]}).write_parquet(buffer)
-    data = bytearray(buffer.getvalue())
-    footer_length = struct.unpack("<I", data[-8:-4])[0]
-    data[len(data) - 8 - footer_length + 79] = 1
-    return bytes(data)
-
-
 def _panicking_footer(entry: Path) -> None:
-    entry.write_bytes(_panicking_parquet())
+    entry.write_bytes(panicking_parquet())
 
 
 def test_the_corrupt_footer_fixture_makes_polars_panic() -> None:
     # Guards the tests below: if a Polars upgrade changes the layout, find a new offset.
     with pytest.raises(pl.exceptions.PanicException):
-        pl.read_parquet_schema(io.BytesIO(_panicking_parquet()))
+        pl.read_parquet_schema(io.BytesIO(panicking_parquet()))
 
 
 def test_footer_that_panics_polars_is_reported_as_unreadable(tmp_path: Path) -> None:
@@ -254,7 +244,7 @@ def test_footer_that_panics_polars_fails_only_that_file(
     assert _run(project, force=force).failed == 1
 
     assert len(_entries(project, "bronze")) == 2
-    assert entry.read_bytes() == _panicking_parquet()
+    assert entry.read_bytes() == panicking_parquet()
     assert "unreadable_parquet_footer" in caplog.text
 
 
