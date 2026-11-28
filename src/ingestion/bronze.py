@@ -9,8 +9,10 @@ starts with the file's hash. An unusable lake entry for a hash fails that file (
 `lake_entries.py`). See docs/decisions/0001-bronze-parquet-storage.md and 0002.
 """
 
+import glob
 import json
 import logging
+import os
 import secrets
 import sys
 import time
@@ -213,7 +215,8 @@ def _elapsed(started: float) -> float:
 
 
 def _publish_new_file(frame: pl.DataFrame, target: Path) -> None:
-    publish(target, frame.write_parquet)
+    # Absolute: the library takes the path as written.
+    publish(target, lambda temp: frame.write_parquet(temp.absolute()))
 
 
 def _warn_stale_temp_files(source: str, source_dir: Path) -> None:
@@ -308,10 +311,31 @@ def ingest_file(
     return IngestResult(log_name, file_hash, frame.height, skipped=False)
 
 
+def _bronze_pattern(source: str, lake_root: Path) -> str:
+    """The DuckDB pattern for a source: the folder is literal, only the tail has wildcards."""
+    # DuckDB does not take these two starts as written, so such a root is made absolute.
+    if str(lake_root).lower().startswith(("~", "file:")):
+        # `key=value` folder names above the root would become columns.
+        if "=" in str(Path.cwd()):
+            raise ValueError("lake root cannot be used: `=` in the current directory")
+        lake_root = lake_root.absolute()
+    # Checked last, on the path DuckDB is given.
+    if os.sep != "\\" and "\\" in str(lake_root):
+        raise ValueError("lake root cannot contain a backslash")
+    folder = glob.escape(str(_source_dir(lake_root, source)))
+    return str(Path(folder) / "**" / "*.parquet")
+
+
 def read_bronze(source: str, lake_root: Path) -> duckdb.DuckDBPyRelation:
-    """Return a DuckDB relation over every bronze file of a source (missing columns are null)."""
+    """Return a DuckDB relation over every bronze file of a source (missing columns are null).
+
+    `lake_root` names a folder as written. A root that starts with `~` or `file:` is made absolute
+    under the current directory first. Raises ValueError if the resulting path has a backslash
+    where that is not the path separator, or if such a root is used while the current directory
+    has `=` in its path.
+    """
     _validate_source(source)
-    pattern = str(_source_dir(lake_root, source) / "**" / "*.parquet")
+    pattern = _bronze_pattern(source, lake_root)
     return duckdb.sql(
         "select * from read_parquet(?, hive_partitioning = true, union_by_name = true)",
         params=[pattern],

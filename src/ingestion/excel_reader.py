@@ -49,7 +49,7 @@ def _fail(path: Path, problem: str) -> ExcelReadError:
 def _open(path: Path) -> fastexcel.ExcelReader:
     problem = ""
     try:
-        return fastexcel.read_excel(path)
+        return fastexcel.read_excel(path.absolute())  # absolute: taken as written
     except Exception as error:
         # The parser message can quote file content, so only its type is kept, and the raise
         # happens outside the block so `__context__` is empty too.

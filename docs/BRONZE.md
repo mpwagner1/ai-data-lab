@@ -144,6 +144,37 @@ Every bronze file of the source is read with `union_by_name`, so files with diff
 load together and a column missing from a file comes back as null. `_sheet_name` is null for old
 files written before it existed.
 
+`lake_root` names a folder as written. A root that starts with `~` or `file:` is made absolute
+under the current directory first. `read_bronze` raises `ValueError` if the resulting path has a
+backslash in a folder name (except on Windows, where it is the separator), or if such a root is
+used while the current directory has `=` in its path.
+
+### Checking an existing lake
+
+Check each lake written before this version of the readers, once per source. List the file names
+to verify:
+
+```python
+from pathlib import Path
+from ingestion.bronze import read_bronze
+
+read_bronze("<source>", Path("lake")).filter(
+    "contains(_file_name, '*') or contains(_file_name, '?') or contains(_file_name, '[')"
+).project("_file_name, _file_hash, _ingested_at").distinct().show(max_rows=10000)
+```
+
+No rows means there is nothing to do. An archive member (`<archive>!<member>`) needs no check.
+If code of your own called the loader with a folder path that holds one of those characters or
+starts with `~`, check every file loaded that way too. For each name to check, load it again:
+
+1. Stop runs for the source.
+2. Move `lake/bronze/<source>/ingest_date=*/<_file_hash>*.parquet` to a folder outside the lake.
+   Move rather than delete, so the old and new rows can be compared.
+3. Make sure the file is in `data/landing/<source>/` under its original name, with bytes whose
+   SHA-256 is `_file_hash`. If not, copy the raw copy
+   (`lake/raw/<source>/receive_date=*/<_file_hash><ext>`) there.
+4. Run the source again. Anything already built from the moved files needs rebuilding.
+
 ### Source config: `config/sources/<source>.yaml`
 
 Optional. Without the file every key has its default. The file is YAML, read with `safe_load`
