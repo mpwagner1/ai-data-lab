@@ -1,7 +1,6 @@
 """Every reader and `read_bronze` use the path they are given. All data is synthetic."""
 
 import io
-import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -150,7 +149,6 @@ def test_a_relative_tilde_lake_root_is_used_as_written(project: Path, home: Path
     assert len(list((home / "lake").rglob("*.parquet"))) == 1
 
 
-@pytest.mark.skipif(os.sep == "\\", reason="a backslash is the path separator here")
 def test_read_bronze_rejects_a_lake_root_with_a_backslash(project: Path) -> None:
     _load_into(project / "a" / "b" / "lake", project / "other.csv", "sibling")
     lake = project / "a\\b" / "lake"
