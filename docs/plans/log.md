@@ -187,3 +187,13 @@
 | 2026-11-27 | n/a | oracle | Sonnet | AB#35: brain lessons format and vendor pages written as drafts. Vault audit passed: new changes only in allowed paths, no sensitive patterns; earlier uncommitted vault changes were already there. Resolved. |
 | 2026-11-27 | n/a | Alfred | n/a | Targeted evals, 1 run each, Sonnet: damian (2 cases) and red-hood (2) on court PR 17's branch, drake (1) on court PR 15's branch. All 1.00. Not recorded in the score history. |
 | 2026-11-27 | n/a | Alfred | n/a | Session wrap-up. Stories AB#36 to AB#38 created, not started. None of the session's PRs merged. |
+| 2026-11-27 | #146 | grayson, damian | Sonnet | After the owner merged PRs 149 and 151: PR 150 updated with main and one register entry; PASS at 6ec9ddb. |
+| 2026-11-27 | #134 | drake, grayson, damian | Sonnet | Owner ran the Codex adversarial review. All three findings reproduced; the owner set them to Medium or lower. PR 161: round 1 FAIL, fixed; PASS at d417571. Merged. One item stays a documented limitation. |
+| 2026-11-27 | #162 | grayson, damian | Sonnet | AB#41: PR 163 (Medium robustness item); PASS at 10793a2. Merged. A follow-up story is open on the board (AB#42). |
+| 2026-11-27 | #164 | Alfred | Opus | PR 165: a PR description mentions its work item once, with Closed. A bare mention first had stopped the board move. Not reviewed. Merged. |
+| 2026-11-27 | court #22, #20 | lucius, grayson, damian | Sonnet | Court PRs 23 and 21 updated with main after PR 15 merged; PASS at their new heads. Merged. |
+| 2026-11-27 | court #30 | Alfred | Opus | AB#43: court PR 31 adds the Apache-2.0 license. Not reviewed. Merged. |
+| 2026-11-28 | court #16, #18 | grayson, damian | Sonnet | Court PRs 17 and 19 updated with main; PASS at their new heads. Merged. |
+| 2026-11-28 | court #32 | grayson, damian | Sonnet | AB#44: court PR 33 aligns agent instructions with the trust policy. Round 1 FAIL, fixed; PASS at d38e930. Merged. |
+| 2026-11-28 | court #24, #26 | lucius, grayson, damian | Sonnet | Court PRs 25 and 27 updated with main; PASS at their new heads. Merged. |
+| 2026-11-28 | n/a | Alfred | n/a | Only court PR 29 (draft) and project-starter PR 4 remain open from the session. These rows were added late, in one batch, not at each dispatch. |
