@@ -15,13 +15,27 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
+
+# Build dependencies are not locked by uv, so pin the ones hatchling pulls in.
+[tool.uv]
+build-constraint-dependencies = [
+    "editables==0.6",
+    "packaging==26.3",
+    "pathspec==1.1.1",
+    "pluggy==1.7.0",
+    "tomlkit==0.15.2",
+    "trove-classifiers==2026.9.21.13",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ingestion"]
 
 [dependency-groups]
+ci = [
+    "zizmor==1.32.0",
+]
 dev = [
     "openpyxl>=3.1.5",
     "pre-commit>=4.7.0",
