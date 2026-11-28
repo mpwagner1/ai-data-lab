@@ -878,4 +878,4 @@ def test_archive_with_a_mismatched_raw_copy_fails_and_loads_nothing(
     assert main(["demo"]) == 1
 
     assert _bronze_count(project) == 0
-    assert 'error="RuntimeError"' in caplog.text
+    assert 'error="BadLakeEntryError"' in caplog.text

@@ -3,6 +3,9 @@
 Layout: `<lake_root>/raw/<source>/receive_date=YYYY-MM-DD/<file_hash><ext>`. Landing files are
 never moved or deleted. Symlinks are never followed, so nothing outside the landing folder can
 reach the lake.
+
+A raw entry counts as a received copy only if it is a regular, non-symlink file whose bytes hash
+to the name it carries (see `lake_entries.py`).
 """
 
 import os
@@ -13,11 +16,21 @@ from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 
+from ingestion.lake_entries import copy_problem, usable_entries
 from ingestion.metadata import hash_file
 
 _RAW_EXTENSION = re.compile(r"\.[a-z0-9]{1,10}")
 _LOCK_SUFFIXES = (".lock", ".lck")
 SOURCE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def _sync(path: Path) -> None:
+    """Flush a file, or a folder's entries, to disk. A read-only descriptor works on POSIX."""
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def publish(target: Path, write: Callable[[Path], object]) -> None:
@@ -27,13 +40,18 @@ def publish(target: Path, write: Callable[[Path], object]) -> None:
     is never followed or truncated. A run that stops early can leave that temp file behind (next
     to `target` if it was already linked). The skip checks ignore it by its `.tmp` suffix and the
     landing scan because it is hidden.
+
+    The temp file is synced before the link and the target's folder after it. If the folder sync
+    fails, the error propagates and the complete file stays at `target`.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_name(f".{secrets.token_hex(8)}{target.suffix}.tmp")
     temp.touch(exist_ok=False)  # outside `try`: never remove a file this call did not create
     try:
         write(temp)
+        _sync(temp)
         os.link(temp, target)  # no-replace: raises FileExistsError
+        _sync(target.parent)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -59,19 +77,28 @@ def partition_files(root: Path, key: str) -> Iterator[Path]:
             yield from folder.iterdir()
 
 
-def _find_raw_copy(raw_dir: Path, file_hash: str) -> Path | None:
-    copies = (
+def find_raw_copy(raw_dir: Path, file_hash: str) -> Path | None:
+    """Return a raw copy of `file_hash`, or None if no entry carries its name. Read-only.
+
+    Every matching entry in every partition is hashed; BadLakeEntryError if any one is not an
+    exact regular-file copy.
+    """
+    matches = (
         p
         for p in partition_files(raw_dir, "receive_date")
         if (p.name == file_hash or p.name.startswith(f"{file_hash}."))
         and not p.name.endswith(".tmp")
     )
-    return next(copies, None)
+    copies = usable_entries("raw", file_hash, matches, lambda p: copy_problem(p, file_hash))
+    return copies[0] if copies else None
 
 
 def raw_copy_path(lake_root: Path, source: str, file_hash: str) -> Path:
-    """Return the raw-zone copy of a received hash; FileNotFoundError if there is none."""
-    copy = _find_raw_copy(lake_root / "raw" / source, file_hash)
+    """Return the raw-zone copy of a received hash; FileNotFoundError if there is none.
+
+    BadLakeEntryError if an entry for the hash is unusable.
+    """
+    copy = find_raw_copy(lake_root / "raw" / source, file_hash)
     if copy is None:
         raise FileNotFoundError(f"no raw copy for hash {file_hash}")
     return copy
@@ -81,14 +108,15 @@ def receive_raw(path: Path, source: str, lake_root: Path, file_hash: str, run_at
     """Copy a landing file unchanged into the raw zone. Returns False if its hash is already there.
 
     The copy is hashed again so the stored bytes are proven equal to the landing bytes.
-    Raises ValueError for a symlink (never followed).
+    Raises ValueError for a symlink (never followed), and BadLakeEntryError (nothing is written)
+    if an existing raw entry for the hash is unusable.
     """
     if not SOURCE_PATTERN.fullmatch(source):
         raise ValueError(f"invalid source name: {source!r}")
     if path.is_symlink():
         raise ValueError(f"symlinks are not received: {path.name}")
     raw_dir = lake_root / "raw" / source
-    if _find_raw_copy(raw_dir, file_hash) is not None:
+    if find_raw_copy(raw_dir, file_hash) is not None:
         return False
     target = raw_dir / f"receive_date={run_at:%Y-%m-%d}" / f"{file_hash}{_raw_extension(path)}"
 

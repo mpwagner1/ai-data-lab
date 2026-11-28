@@ -9,10 +9,12 @@ is as heavy as a real run minus the write. Nothing is written under the lake or 
 
 Outcomes: `ready` (a run would load it), a held reason (`no_reader`, `needs_config`, `encoding`),
 `skipped` (identical content to an earlier file in the same call, which a real run skips) or
-`failed` with the error type only (never a message, which can hold file content).
+`failed` with the error type only (never a message, which can hold file content). A file that
+fails on an unusable lake entry also carries the entry details (`lake_entries.py`).
 """
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -26,10 +28,14 @@ REASON_SKIPPED = "skipped"
 
 @dataclass(frozen=True)
 class Outcome:
-    """`reason` is a REASON_* value; `error` is the exception type name when it is `failed`."""
+    """`reason` is a REASON_* value; `error` is the exception type name when it is `failed`.
+
+    `detail` holds extra log fields for a failure (`lake_entries.error_fields`).
+    """
 
     reason: str
     error: str | None = None
+    detail: Mapping[str, object] = field(default_factory=dict)
 
 
 def file_outcome(
@@ -94,4 +100,5 @@ def log_pending(
     fields["reason"] = outcome.reason
     if outcome.error is not None:
         fields["error"] = outcome.error
+    fields.update(outcome.detail)
     bronze._log("bronze_pending", **fields)

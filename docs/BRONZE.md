@@ -62,19 +62,25 @@ subfolders and symlinks are not loaded (section 7). The loader never moves or de
 `lake/raw/<source>/receive_date=YYYY-MM-DD/<file_hash><ext>`. `<ext>` is the lowercase original
 extension (a dot and 1 to 10 letters or digits), otherwise none; `.tmp` is reserved and never
 kept. The copy is hashed again, and if
-the same bytes were received before (any day, any name) no second copy is made.
+the same bytes were received before (any day, any name) no second copy is made. An earlier copy
+counts only if it is a regular file (not a symlink) whose bytes hash to `<file_hash>`. Every
+matching entry in every partition is checked on each run, and one bad entry fails the file, even
+when another partition holds a good copy (section 5, Unusable lake entries).
 
-**Skip check.** A file counts as already loaded when a bronze file name starts with its hash. Such
+**Skip check.** A file counts as already loaded when a bronze entry's name starts with its hash and
+the entry is usable: a regular file (not a symlink) with a readable Parquet footer. Such
 files are skipped before any reader runs (`bronze_skip`), so a changed config does not re-parse
-them. An archive is the exception: it is expanded again on a rerun so that each member's hash can
-be checked (section 4).
+them. If any matching entry is not usable, the file fails and nothing is written for it. An archive
+is the exception: it is expanded again on a rerun so that each member's hash can be checked
+(section 4).
 
 **Parse and write.** The format is detected (section 4) and the file is read into strings, with
 metadata added and the result collected in memory. The source is hashed again; if it changed during
 the read, the run fails rather than write rows that do not match `_file_hash`. The frame goes to a
 hidden temp file with a unique name (`.<16 hex>.parquet.tmp`) and is published with `os.link`, which
-fails if the target name exists. The temp file is removed either way, so a crash leaves a `.tmp`
-file, never a half-written Parquet file. The raw copy and Azure staging use the same helper. Names
+fails if the target name exists. The temp file is synced to disk (`fsync`) before the link and the
+target's folder after it. The temp file is removed either way, so a run that stops early leaves a
+`.tmp` file, never a half-written Parquet file. The raw copy and Azure staging use the same helper. Names
 look like this (the hash is 64 hex characters, shortened here):
 
 ```
@@ -86,7 +92,8 @@ loads in the same second never collide, so `--force` over identical files works.
 file (a header and no rows) is written as a zero-row Parquet file. That records the load, so the
 next run skips it instead of reading it again.
 
-**Pending.** A raw file is pending when no bronze file name starts with its hash. There is no
+**Pending.** A raw file is pending when no bronze file name starts with its hash (an unusable
+entry does not count as loaded; it fails the file). There is no
 manifest, so every run tries every pending file: adding a reader or a config key replays held files
 with no extra command. A failed file is pending too and is tried again next run. `--pending` lists
 them (section 5).
@@ -94,7 +101,8 @@ them (section 5).
 **Reruns and `--force`.** A rerun over the same folder writes nothing and logs `bronze_skip` for
 each loaded file. `--force` skips the skip check, so a loaded file is written again as a new bronze
 file and the earlier one stays. The rows are duplicated on purpose; silver dedupes on `_file_hash`.
-The raw zone is not copied again.
+The raw zone is not copied again. Because the bronze check is skipped, `--force` also writes when an
+unusable bronze entry exists, and leaves that entry in place. It does not skip the raw check.
 
 ## 3. How to run it
 
@@ -116,7 +124,7 @@ use only letters, digits, `_` and `-`, because it becomes a folder name. Any oth
 | Flag | What it does |
 | --- | --- |
 | `--pending` | Lists every landing file, and each archive member, with no bronze rows yet, with its outcome (section 5). Reads each one the way a run does and writes nothing. Exits 3 if any item is listed, else 0. `--force` has no effect with it |
-| `--force` | Ignores the skip check and loads every file again (section 2) |
+| `--force` | Ignores the skip check and loads every file again (section 2). The raw zone check still applies |
 | `--delimiter X` | One character, the delimiter for `.txt` and `.dat` files. Beats the source config `delimiter`, but only for those two extensions: a `.csv`, `.tsv` or `.psv` keeps its own delimiter. Must be exactly one byte in UTF-8 and not a quote or a line break, otherwise the run exits 2 (`error=InvalidDelimiter`). For a tab, pass a real tab (`$'\t'` in zsh or bash), not the two characters `\t`. The flag is not stored, so a later run without it holds the file again |
 
 Read the data back with DuckDB:
@@ -229,7 +237,7 @@ A run and `--pending` give each file one reason. Both use the same read path
 | `needs_config` | A `.txt` or `.dat` file with no delimiter from `--delimiter` or config | held: `bronze_unparsed` (WARNING) | `bronze_pending reason=needs_config` |
 | `no_reader` | The format is not read yet: a binary file, a nested archive, `.tar`, fixed-width text, or a file with no recognised signature | held: `bronze_unparsed` | `bronze_pending reason=no_reader` |
 | `encoding` | The text does not decode with the config `encoding`, or it looks like UTF-16/32 with the wrong byte order or a stray BOM (section 6) | held: `bronze_unparsed` | `bronze_pending reason=encoding` |
-| `failed` | The file would fail: empty or corrupt content, invalid JSON, a bad workbook, an exceeded cap, or a file that cannot be read at all (for example no read permission) | failed: `bronze_error` (ERROR), exit 1 | `bronze_pending reason=failed error=<type>`; no `file_hash` if the file cannot be hashed |
+| `failed` | The file would fail: empty or corrupt content, invalid JSON, a bad workbook, an exceeded cap, an unusable lake entry, or a file that cannot be read at all (for example no read permission) | failed: `bronze_error` (ERROR), exit 1 | `bronze_pending reason=failed error=<type>`; no `file_hash` if the file cannot be hashed |
 | `archive_error` | The archive itself cannot be read (corrupt, encrypted, unsupported compression, over a cap) | failed: `bronze_error error=ArchiveReadError`, exit 1 | one `reason=archive_error` line for the archive, no hash. Members listed before a failure found mid-stream (a bad CRC, for example) stay listed |
 | `ready` | The reader and config are there and the read succeeded, so a run writes it | written: `bronze_write` | `bronze_pending reason=ready` |
 | `skipped` | Same bytes as an earlier `ready` file in the same `--pending` list (the first copy in run order is the one that loads) | `bronze_skip` for the later copy | `bronze_pending reason=skipped` |
@@ -240,7 +248,8 @@ hold or fail it the same way.
 ### `--pending`
 
 `--pending` lists every landing file, and each archive member, that has no bronze rows yet, one
-`bronze_pending` line each. It reads each file the way a run does (detect, read, add metadata) and
+`bronze_pending` line each. It also lists, as `failed`, any file or member with an unusable lake
+entry, even one already loaded. It reads each file the way a run does (detect, read, add metadata) and
 then drops the result, so it costs about as much time and memory as a run, minus the write. It
 writes nothing: no raw copy and no bronze file. Archive members are extracted to a temporary folder
 outside the lake and removed afterwards.
@@ -261,12 +270,47 @@ not a directory is a setup error, as it is for a run: one `bronze_error` line an
 Failures (exit 1), logged as `bronze_error ... error=<type>`: for example an empty or whitespace-only
 file (`ValueError`), a corrupt or password-protected workbook (`ExcelReadError`), invalid JSON
 (`JsonReadError`), an unreadable Parquet file (`ParquetReadError`), an archive error or cap
-(`ArchiveReadError`), a file that changed during the read or an archive whose raw copy does not match
-its hash (`RuntimeError`), a file that cannot be
+(`ArchiveReadError`), a file that changed during the read (`RuntimeError`), an unusable raw or
+bronze entry (`BadLakeEntryError`, above), a file that cannot be
 read at all (for example `PermissionError`). A raw or bronze partition folder that cannot be listed
 also fails the file, because the loader cannot tell whether it was loaded. A `sheets:` name not in the workbook, or a `header_row`
 past the end of a sheet, also fails the file. A failed member fails only that member; members
 already written stay.
+
+### Unusable lake entries
+
+Before it relies on an entry already in the lake, bronze checks it. A failed check raises
+`BadLakeEntryError`, which fails that file (or that archive member) like any other failure. Nothing
+is written beside the entry, and the loader never overwrites, moves or deletes it.
+
+| `zone` | Entries checked | A usable entry is | `<problem>` values |
+| --- | --- | --- | --- |
+| `raw` | Every `receive_date=*` entry named `<file_hash>` or `<file_hash>.<ext>` (`.tmp` aside) | A regular file, not a symlink, whose SHA-256 is `<file_hash>` | `symlink`, `not_a_regular_file`, `hash_mismatch` |
+| `bronze` | Every `ingest_date=*` entry named `<file_hash>*.parquet` | A regular file, not a symlink, with a readable Parquet footer | `symlink`, `not_a_regular_file`, `unreadable_parquet_footer` |
+
+The log line (`bronze_error`, or `bronze_pending reason=failed`) carries `zone`, `file_hash`,
+`bad_entries` (comma-separated `<partition>/<entry name>:<problem>`) and `usable_entries`, the number
+of other matches that passed. `usable_entries` above 0 means a good copy exists, and the file still
+fails until the bad one is dealt with. An entry or folder that cannot be read at all fails the file
+with its own error type (for example `PermissionError`); fix the permissions.
+
+**Repair** is a manual step by an operator:
+
+1. Stop runs for the source. Run `--pending` to list the affected files; it writes nothing.
+2. Move each entry in `bad_entries` out of `lake/raw/<source>/` or `lake/bronze/<source>/`, to a
+   folder outside the lake. Move it rather than delete it, so it can be examined. For a symlink,
+   move the link, not its target. Renaming it inside the lake is not enough: `read_bronze` reads
+   every `*.parquet` file under the source.
+3. Make sure the bytes can be restored. If `usable_entries` is 0:
+   - `raw`: the next run copies the landing file again. If the landing file is gone or has changed,
+     put the original bytes back into landing first (their SHA-256 must equal `file_hash`).
+   - `bronze`: the next run writes the file again from landing, with a new `_ingested_at`. If the
+     landing file is gone, copy the raw copy back into landing under its original name (the
+     `bronze_receive` log line has the name and hash). For an archive member, restore the archive.
+4. Run the source again, then `--pending`. It should no longer list the file.
+
+Do not use `--force` to repair a bronze entry: it adds a new file but leaves the bad one, which still
+fails later runs and can break `read_bronze`.
 
 Exit codes (from `src/ingestion/bronze_cli.py`). When more than one applies, the first one in the
 list wins:
@@ -291,13 +335,13 @@ are WARNING; every other event is INFO.
 | `bronze_skip` | `source`, `file_name`, `file_hash`, `duration_s` | Already loaded; not read |
 | `bronze_write` | `source`, `file_name`, `file_hash`, `rows_ingested`, `duration_s` | A bronze file was written |
 | `bronze_unparsed` | `source`, `file_name`, `file_hash`, `reason` | Held this run (`needs_config`, `no_reader`, `encoding`) |
-| `bronze_error` | `source`, `file_name`, `error` (exception type) | A file failed. A setup error (exit 2) has no `file_name`; it logs `source` and `error` only, the same for a missing, unlistable or non-directory landing folder (a path that is a file logs `FileNotFoundError`). An invalid `--delimiter` logs `error` only |
+| `bronze_error` | `source`, `file_name`, `error` (exception type); for `BadLakeEntryError` also `zone`, `file_hash`, `bad_entries`, `usable_entries` | A file failed. A setup error (exit 2) has no `file_name`; it logs `source` and `error` only, the same for a missing, unlistable or non-directory landing folder (a path that is a file logs `FileNotFoundError`). An invalid `--delimiter` logs `error` only |
 | `bronze_run` | `source`, `files`, `written`, `skipped`, `pending`, `failed` | Summary of a run. `files` counts landing files; members are in the counts |
 | `bronze_no_files` | `source` | The landing folder has no loadable files |
 | `bronze_ignored` | landing: `source`, `symlinks`; archive: `source`, `file_name`, `members`, `symlinks` | Counts of skipped entries. Names of skipped entries are not logged. `members` counts every skipped entry in the archive, directories and symlinks included |
 | `bronze_sheet` | `file_name`, `sheet_index`, `header_row`, `skipped_rows`, `rows` | One workbook sheet read. The sheet index, never its name. For an archive member the file name is the generated temp name |
 | `bronze_stale_temp` | `source`, `count`, `files` | Leftover bronze `.parquet.tmp` files. Reported, never deleted |
-| `bronze_pending` | `source`, `file_name`, `reason`, `file_hash` (when it can be computed), `error` (for `failed` only), `member` (archive members only: the 1-based index) | One line per item listed by `--pending`. For an archive, `file_name` is the archive name |
+| `bronze_pending` | `source`, `file_name`, `reason`, `file_hash` (when it can be computed), `error` (for `failed` only), `member` (archive members only: the 1-based index); `zone`, `bad_entries`, `usable_entries` for `BadLakeEntryError` | One line per item listed by `--pending`. For an archive, `file_name` is the archive name |
 | `bronze_pending_run` | `source`, `pending` | Summary of `--pending` |
 
 Archive members are logged as `<archive>!#<index>` (the 1-based index in the archive) with their
@@ -328,6 +372,8 @@ config message can echo config text.
 
 - **The raw zone is never modified.** Copies are written with temp-file-then-link and never
   replaced, and the copy is hashed again. Landing files are never moved or deleted.
+- **A name is not proof.** An existing raw or bronze entry is checked before it is relied on
+  (section 5, Unusable lake entries).
 - **Symlinks inside the landing folder are not followed.** They are skipped and counted
   (`bronze_ignored symlinks=K`). The landing folder itself may be a symlink (for example to a
   mounted share); that is an operator's choice and is followed. Calling `ingest_file` directly on a
@@ -351,6 +397,14 @@ config message can echo config text.
   there needs a conditional create (an upload with `If-None-Match: *`, or `overwrite=False` in the
   Azure SDK). That is not built.
 - **A forced reload duplicates that file's rows by design.** Silver dedupes on `_file_hash`.
+- **What the entry checks cover.** Only entries for files that are in landing during a run (or
+  `--pending`) are checked. The bronze check reads the Parquet footer, not the data pages, so damage
+  inside the data is not detected. It does not check that the footer's rows match the raw bytes.
+  Partition folders themselves are not checked. Each run hashes the raw copy of every landing file,
+  which adds read time.
+- **Durability.** The `fsync` calls cover the published file and its folder. A partition folder
+  created by the same write is not synced into its own parent. On macOS, `fsync` does not force the
+  drive's own cache to disk. The publish step needs a POSIX system (it opens a folder to sync it).
 - **Memory.** Every file is collected in memory before it is written, for every format, so a
   file's size is limited by RAM. `--pending` holds each file the same way (section 5). Only archives
   have caps. A QA run measured a 40 MB UTF-8 CSV at a peak of about 270 MB (see
@@ -369,6 +423,7 @@ config message can echo config text.
 | `src/ingestion/bronze_cli.py` | Command line: flags, `--pending` listing, exit codes |
 | `src/ingestion/pending.py` | The outcome of one file without a write (`ready`, held reasons, `failed`, `skipped`), shared with the run |
 | `src/ingestion/raw_zone.py` | Raw zone copy (`receive_raw`), the no-replace `publish` helper, the landing folder scan |
+| `src/ingestion/lake_entries.py` | Checks on existing raw and bronze entries, `BadLakeEntryError` and its log fields |
 | `src/ingestion/detect.py` | `FileFormat`, `detect_format` (config, signature, text rules), `validate_format` |
 | `src/ingestion/source_config.py` | `SourceConfig`, `load_source_config`, validation of every config key |
 | `src/ingestion/metadata.py` | `hash_file`, the metadata columns (`BRONZE_META_COLUMNS`), `with_metadata` |

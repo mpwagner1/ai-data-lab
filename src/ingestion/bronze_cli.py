@@ -12,9 +12,10 @@ from pathlib import Path
 from ingestion import bronze
 from ingestion.archive_ingest import ARCHIVE_FORMATS, list_pending_members
 from ingestion.detect import detect_format
+from ingestion.lake_entries import error_fields
 from ingestion.metadata import hash_file
 from ingestion.pending import REASON_FAILED, Outcome, log_pending, outcome_once
-from ingestion.raw_zone import landing_files
+from ingestion.raw_zone import find_raw_copy, landing_files
 from ingestion.source_config import SourceConfig, validate_delimiter
 
 logger = logging.getLogger(__name__)
@@ -23,20 +24,23 @@ logger = logging.getLogger(__name__)
 def _pending_file(
     path: Path,
     source: str,
-    source_dir: Path,
+    lake_root: Path,
     config: SourceConfig,
     delimiter: str | None,
     seen: dict[str, Outcome],
 ) -> int:
     """Log what a real run would do with one landing file; return how many items are pending.
 
-    Same order and guard as `bronze.ingest_landing`: hash, then detect, then read. A step that
-    raises is `failed` with the error type only (never the message, which can hold the path).
+    Same order and guard as `bronze.ingest_landing`: hash, check the raw zone, then detect, then
+    read. A step that raises is `failed` with the error type only (never the message, which can
+    hold the path), plus the entry details for an unusable lake entry.
     """
+    source_dir = bronze._source_dir(lake_root, source)
     file_hash: str | None = None
-    problem = ""
+    detail: dict[str, object] = {}
     try:
         file_hash = hash_file(path)
+        find_raw_copy(lake_root / "raw" / source, file_hash)  # a run fails on a bad raw entry
         if bronze._already_ingested(source_dir, file_hash):
             return 0
         file_format = detect_format(path, config)
@@ -46,9 +50,9 @@ def _pending_file(
             )
         outcome = outcome_once(seen, path, file_hash, config, delimiter, file_format)
     except Exception as error:  # noqa: BLE001 - reported by type, like a real run's bronze_error
-        problem = type(error).__name__
-    if problem:
-        outcome = Outcome(REASON_FAILED, problem)
+        detail = error_fields(error)
+    if detail:
+        outcome = Outcome(REASON_FAILED, detail=detail)
     log_pending(source, path.name, file_hash, outcome)
     return 1
 
@@ -69,11 +73,10 @@ def list_pending(
     path (see `pending.py`), so this costs as much memory as a run. Returns the count.
     """
     folder, config = bronze._prepare(source, landing_root, config_root)
-    source_dir = bronze._source_dir(lake_root, source)
     seen: dict[str, Outcome] = {}
     count = 0
     for path in landing_files(folder)[0]:
-        count += _pending_file(path, source, source_dir, config, delimiter, seen)
+        count += _pending_file(path, source, lake_root, config, delimiter, seen)
     bronze._log("bronze_pending_run", source=source, pending=count)
     return count
 
