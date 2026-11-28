@@ -38,6 +38,7 @@ from pathlib import Path
 
 import polars as pl
 
+from ingestion.lake_entries import POLARS_PANIC
 from ingestion.parsed import ParsedPart
 from ingestion.source_config import SourceConfig
 
@@ -145,7 +146,7 @@ def _guarded[T](work: Callable[[], T]) -> tuple[T | None, str | None]:
     """
     try:
         return work(), None
-    except Exception as error:
+    except (Exception, POLARS_PANIC) as error:
         return None, type(error).__name__
 
 

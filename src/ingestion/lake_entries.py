@@ -17,6 +17,10 @@ PROBLEM_NOT_FILE = "not_a_regular_file"
 PROBLEM_FOOTER = "unreadable_parquet_footer"
 PROBLEM_HASH = "hash_mismatch"
 
+# Some damaged inputs make Polars panic. This is not an `Exception`, so `except Exception` misses
+# it: every handler around a Polars read of untrusted bytes must name it.
+POLARS_PANIC = pl.exceptions.PanicException
+
 
 class BadLakeEntryError(RuntimeError):
     """A lake entry for a file hash cannot be used.
@@ -65,9 +69,7 @@ def parquet_problem(path: Path) -> str | None:
     with path.open("rb") as handle:
         try:
             pl.read_parquet_schema(handle)
-        # Some corrupt footers make Polars panic. PanicException is not an `Exception`, so no
-        # handler further up would catch it.
-        except (pl.exceptions.PolarsError, pl.exceptions.PanicException):
+        except (pl.exceptions.PolarsError, POLARS_PANIC):
             return PROBLEM_FOOTER
     return None
 
