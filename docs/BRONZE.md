@@ -79,7 +79,11 @@ metadata added and the result collected in memory. The source is hashed again; i
 the read, the run fails rather than write rows that do not match `_file_hash`. The frame goes to a
 hidden temp file with a unique name (`.<16 hex>.parquet.tmp`) and is published with `os.link`, which
 fails if the target name exists. The temp file is synced to disk (`fsync`) before the link and the
-target's folder after it. The temp file is removed either way, so a run that stops early leaves a
+target's folder after it. If the folder sync fails after the link, the file is already at its final
+name and stays there: this run reports the item failed. The next run finds a usable entry, so a
+bronze file is skipped (`bronze_skip`), a raw copy counts as received (the load then goes ahead),
+and Azure staging skips the identical landing file. The folder is not synced again. The temp file is
+removed either way, so a run that stops early leaves a
 `.tmp` file, never a half-written Parquet file. The raw copy and Azure staging use the same helper. Names
 look like this (the hash is 64 hex characters, shortened here):
 
@@ -99,10 +103,10 @@ with no extra command. A failed file is pending too and is tried again next run.
 them (section 5).
 
 **Reruns and `--force`.** A rerun over the same folder writes nothing and logs `bronze_skip` for
-each loaded file. `--force` skips the skip check, so a loaded file is written again as a new bronze
-file and the earlier one stays. The rows are duplicated on purpose; silver dedupes on `_file_hash`.
-The raw zone is not copied again. Because the bronze check is skipped, `--force` also writes when an
-unusable bronze entry exists, and leaves that entry in place. It does not skip the raw check.
+each loaded file. With `--force` a loaded file is written again as a new bronze file and the earlier
+one stays. The rows are duplicated on purpose; silver dedupes on `_file_hash`. The raw zone is not
+copied again. `--force` only ignores the fact that a usable bronze entry exists. The entry checks
+still run: with an unusable raw or bronze entry the file fails and nothing is written.
 
 ## 3. How to run it
 
@@ -124,7 +128,7 @@ use only letters, digits, `_` and `-`, because it becomes a folder name. Any oth
 | Flag | What it does |
 | --- | --- |
 | `--pending` | Lists every landing file, and each archive member, with no bronze rows yet, with its outcome (section 5). Reads each one the way a run does and writes nothing. Exits 3 if any item is listed, else 0. `--force` has no effect with it |
-| `--force` | Ignores the skip check and loads every file again (section 2). The raw zone check still applies |
+| `--force` | Loads every file again, even with a usable bronze entry (section 2). Unusable raw or bronze entries still fail the file |
 | `--delimiter X` | One character, the delimiter for `.txt` and `.dat` files. Beats the source config `delimiter`, but only for those two extensions: a `.csv`, `.tsv` or `.psv` keeps its own delimiter. Must be exactly one byte in UTF-8 and not a quote or a line break, otherwise the run exits 2 (`error=InvalidDelimiter`). For a tab, pass a real tab (`$'\t'` in zsh or bash), not the two characters `\t`. The flag is not stored, so a later run without it holds the file again |
 
 Read the data back with DuckDB:
@@ -309,8 +313,7 @@ with its own error type (for example `PermissionError`); fix the permissions.
      `bronze_receive` log line has the name and hash). For an archive member, restore the archive.
 4. Run the source again, then `--pending`. It should no longer list the file.
 
-Do not use `--force` to repair a bronze entry: it adds a new file but leaves the bad one, which still
-fails later runs and can break `read_bronze`.
+`--force` does not get past a bad entry; the file fails until the entry is moved.
 
 Exit codes (from `src/ingestion/bronze_cli.py`). When more than one applies, the first one in the
 list wins:

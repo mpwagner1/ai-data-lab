@@ -697,6 +697,26 @@ def test_publish_does_not_link_when_the_file_sync_fails(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_publish_keeps_the_linked_file_when_the_folder_sync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_sync = raw_zone._sync
+
+    def sync(path: Path) -> None:
+        if path.is_dir():
+            raise OSError("synthetic sync failure")
+        real_sync(path)
+
+    monkeypatch.setattr(raw_zone, "_sync", sync)
+    target = tmp_path / "a.csv"
+
+    with pytest.raises(OSError, match="synthetic"):
+        raw_zone.publish(target, lambda temp: temp.write_bytes(b"new"))
+
+    assert list(tmp_path.iterdir()) == [target]
+    assert target.read_bytes() == b"new"
+
+
 @pytest.mark.parametrize("kind", ["file", "symlink"])
 def test_publish_leaves_an_existing_temp_path_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str

@@ -65,7 +65,9 @@ def parquet_problem(path: Path) -> str | None:
     with path.open("rb") as handle:
         try:
             pl.read_parquet_schema(handle)
-        except pl.exceptions.PolarsError:
+        # Some corrupt footers make Polars panic. PanicException is not an `Exception`, so no
+        # handler further up would catch it.
+        except (pl.exceptions.PolarsError, pl.exceptions.PanicException):
             return PROBLEM_FOOTER
     return None
 

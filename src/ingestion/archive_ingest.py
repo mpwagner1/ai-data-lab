@@ -26,7 +26,13 @@ from ingestion.archives import (
 )
 from ingestion.detect import FileFormat
 from ingestion.lake_entries import BadLakeEntryError, error_fields
-from ingestion.pending import REASON_FAILED, Outcome, log_pending, outcome_once
+from ingestion.pending import (
+    REASON_FAILED,
+    Outcome,
+    failed_outcome,
+    log_pending,
+    outcome_once,
+)
 from ingestion.raw_zone import raw_copy_path
 from ingestion.source_config import SourceConfig
 
@@ -163,7 +169,7 @@ def list_pending_members(
                         continue
                 except BadLakeEntryError as error:  # a real run fails this member only
                     count += 1
-                    failed = Outcome(REASON_FAILED, detail=error_fields(error))
+                    failed = failed_outcome(error)
                     log_pending(source, path.name, unit.file_hash, failed, member=unit.index)
                     continue
                 count += 1

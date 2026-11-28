@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ingestion import bronze
 from ingestion.detect import FileFormat, detect_format
+from ingestion.lake_entries import error_fields
 from ingestion.source_config import SourceConfig
 
 REASON_FAILED = "failed"
@@ -36,6 +37,11 @@ class Outcome:
     reason: str
     error: str | None = None
     detail: Mapping[str, object] = field(default_factory=dict)
+
+
+def failed_outcome(error: Exception) -> Outcome:
+    """A `failed` outcome for `error`: its type name, plus any lake entry details."""
+    return Outcome(REASON_FAILED, type(error).__name__, error_fields(error))
 
 
 def file_outcome(

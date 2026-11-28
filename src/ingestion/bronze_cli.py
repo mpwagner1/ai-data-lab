@@ -12,9 +12,8 @@ from pathlib import Path
 from ingestion import bronze
 from ingestion.archive_ingest import ARCHIVE_FORMATS, list_pending_members
 from ingestion.detect import detect_format
-from ingestion.lake_entries import error_fields
 from ingestion.metadata import hash_file
-from ingestion.pending import REASON_FAILED, Outcome, log_pending, outcome_once
+from ingestion.pending import Outcome, failed_outcome, log_pending, outcome_once
 from ingestion.raw_zone import find_raw_copy, landing_files
 from ingestion.source_config import SourceConfig, validate_delimiter
 
@@ -37,7 +36,7 @@ def _pending_file(
     """
     source_dir = bronze._source_dir(lake_root, source)
     file_hash: str | None = None
-    detail: dict[str, object] = {}
+    failure: Outcome | None = None
     try:
         file_hash = hash_file(path)
         find_raw_copy(lake_root / "raw" / source, file_hash)  # a run fails on a bad raw entry
@@ -50,9 +49,9 @@ def _pending_file(
             )
         outcome = outcome_once(seen, path, file_hash, config, delimiter, file_format)
     except Exception as error:  # noqa: BLE001 - reported by type, like a real run's bronze_error
-        detail = error_fields(error)
-    if detail:
-        outcome = Outcome(REASON_FAILED, detail=detail)
+        failure = failed_outcome(error)
+    if failure is not None:
+        outcome = failure
     log_pending(source, path.name, file_hash, outcome)
     return 1
 

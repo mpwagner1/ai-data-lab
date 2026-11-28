@@ -255,7 +255,7 @@ def ingest_file(
 ) -> IngestResult:
     """Load one file into bronze; skip it if its hash was already loaded unless `force`.
 
-    Without `force`, an unusable bronze entry for the hash raises BadLakeEntryError.
+    An unusable bronze entry for the hash raises BadLakeEntryError, with or without `force`.
 
     A header-only file is written as a zero-row Parquet file so later runs skip it too.
 
@@ -281,7 +281,8 @@ def ingest_file(
     source_dir = _source_dir(lake_root, source)
     config = config or SourceConfig()
     file_hash = file_hash or hash_file(path)
-    if not force and _already_ingested(source_dir, file_hash):
+    loaded = _already_ingested(source_dir, file_hash)  # checked even with `force`
+    if loaded and not force:
         _log(
             "bronze_skip",
             source=source,
