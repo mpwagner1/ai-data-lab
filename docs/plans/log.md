@@ -193,7 +193,7 @@
 | 2026-11-27 | #164 | Alfred | Opus | PR 165: a PR description mentions its work item once, with Closed. A bare mention first had stopped the board move. Not reviewed. Merged. |
 | 2026-11-27 | court #22, #20 | lucius, grayson, damian | Sonnet | Court PRs 23 and 21 updated with main after PR 15 merged; PASS at their new heads. Merged. |
 | 2026-11-27 | court #30 | Alfred | Opus | AB#43: court PR 31 adds the Apache-2.0 license. Not reviewed. Merged. |
-| 2026-11-27 | court #16, #18 | grayson, damian | Sonnet | Court PRs 17 and 19 updated with main; PASS at their new heads. Merged. |
-| 2026-11-27 | court #32 | grayson, damian | Sonnet | AB#44: court PR 33 aligns agent instructions with the trust policy. Round 1 FAIL, fixed; PASS at d38e930. Merged. |
-| 2026-11-27 | court #24, #26 | lucius, grayson, damian | Sonnet | Court PRs 25 and 27 updated with main; PASS at their new heads. Merged. |
-| 2026-11-27 | n/a | Alfred | n/a | Only court PR 29 (draft) and project-starter PR 4 remain open from the session. These rows were added late, in one batch, not at each dispatch. |
+| 2026-11-28 | court #16, #18 | grayson, damian | Sonnet | Court PRs 17 and 19 updated with main; PASS at their new heads. Merged. |
+| 2026-11-28 | court #32 | grayson, damian | Sonnet | AB#44: court PR 33 aligns agent instructions with the trust policy. Round 1 FAIL, fixed; PASS at d38e930. Merged. |
+| 2026-11-28 | court #24, #26 | lucius, grayson, damian | Sonnet | Court PRs 25 and 27 updated with main; PASS at their new heads. Merged. |
+| 2026-11-28 | n/a | Alfred | n/a | Only court PR 29 (draft) and project-starter PR 4 remain open from the session. These rows were added late, in one batch, not at each dispatch. |
