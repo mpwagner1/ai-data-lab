@@ -11,6 +11,7 @@ import traceback
 import uuid
 import zipfile
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 import openpyxl
@@ -20,6 +21,7 @@ import pytest
 from ingestion import archives, bronze
 from ingestion.archives import ArchiveReadError, expand_archive
 from ingestion.bronze import main
+from ingestion.metadata import hash_file
 
 SECRET_NAME = "SECRETMEMBERNAME"
 SECRET_TEXT = "SECRETCONTENT"
@@ -829,3 +831,51 @@ def test_gz_of_an_xlsm_workbook_is_expanded_and_read_by_its_member_name(
     frame = _frames(project)
     assert set(frame["_file_name"]) == {"book.xlsm.gz!book.xlsm"}
     assert frame["id"].to_list() == ["007"]
+
+
+def _zip_of_value(path: Path, value: str) -> None:
+    _zip(path, {"m.csv": f"id\n{value}\n".encode()})
+
+
+def _gz_of_value(path: Path, value: str) -> None:
+    path.write_bytes(gzip.compress(f"id\n{value}\n".encode()))
+
+
+@pytest.mark.parametrize(("name", "build"), [("a.zip", _zip_of_value), ("a.csv.gz", _gz_of_value)])
+def test_archive_replaced_after_receive_loads_no_replacement_rows(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    build: Callable[[Path, str], None],
+) -> None:
+    path = _landing(project) / name
+    build(path, "received")
+    real_receive = bronze.receive_raw
+
+    def receive_then_replace(
+        landing: Path, source: str, lake_root: Path, file_hash: str, run_at: datetime
+    ) -> bool:
+        is_new = real_receive(landing, source, lake_root, file_hash, run_at)
+        build(path, "replaced")  # the producer rewrites the file mid-run
+        return is_new
+
+    monkeypatch.setattr(bronze, "receive_raw", receive_then_replace)
+
+    main(["demo"])
+
+    assert _frames(project)["id"].to_list() == ["received"]
+
+
+def test_archive_with_a_mismatched_raw_copy_fails_and_loads_nothing(
+    project: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = _landing(project) / "a.zip"
+    _zip_of_value(path, "landing")
+    partition = project / "lake" / "raw" / "demo" / "receive_date=2026-01-01"
+    partition.mkdir(parents=True)
+    _zip_of_value(partition / f"{hash_file(path)}.zip", "other")
+
+    assert main(["demo"]) == 1
+
+    assert _bronze_count(project) == 0
+    assert 'error="RuntimeError"' in caplog.text

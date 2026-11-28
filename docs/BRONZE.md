@@ -60,7 +60,8 @@ subfolders and symlinks are not loaded (section 7). The loader never moves or de
 
 **Receive (raw zone).** Each file is hashed and copied unchanged to
 `lake/raw/<source>/receive_date=YYYY-MM-DD/<file_hash><ext>`. `<ext>` is the lowercase original
-extension (a dot and 1 to 10 letters or digits), otherwise none. The copy is hashed again, and if
+extension (a dot and 1 to 10 letters or digits), otherwise none; `.tmp` is reserved and never
+kept. The copy is hashed again, and if
 the same bytes were received before (any day, any name) no second copy is made.
 
 **Skip check.** A file counts as already loaded when a bronze file name starts with its hash. Such
@@ -70,9 +71,10 @@ be checked (section 4).
 
 **Parse and write.** The format is detected (section 4) and the file is read into strings, with
 metadata added and the result collected in memory. The source is hashed again; if it changed during
-the read, the run fails rather than write rows that do not match `_file_hash`. The frame goes to
-`<name>.parquet.tmp` and is published with `os.link`, which fails if the name exists. The temp file
-is removed either way, so a crash leaves a `.tmp` file, never a half-written Parquet file. Names
+the read, the run fails rather than write rows that do not match `_file_hash`. The frame goes to a
+hidden temp file with a unique name (`.<16 hex>.parquet.tmp`) and is published with `os.link`, which
+fails if the target name exists. The temp file is removed either way, so a crash leaves a `.tmp`
+file, never a half-written Parquet file. The raw copy and Azure staging use the same helper. Names
 look like this (the hash is 64 hex characters, shortened here):
 
 ```
@@ -190,7 +192,10 @@ fixed-width reader exists.
 
 **Archives.** The archive is copied once to the raw zone, unchanged. Each member is then its own
 unit: its own SHA-256 (of the member's bytes), its own skip check, its own bronze file through the
-same atomic write, and `_file_name` is `<archive>!<member>`. Members are read with the source
+same atomic write, and `_file_name` is `<archive>!<member>`. Members are expanded from the raw
+copy, not the landing file, after its hash is checked, so they always come from received bytes.
+Members are
+read with the source
 config and `--delimiter` like any landing file. A member that needs config or has no reader is
 held; a member with corrupt content fails; the other members still load.
 
@@ -256,8 +261,10 @@ not a directory is a setup error, as it is for a run: one `bronze_error` line an
 Failures (exit 1), logged as `bronze_error ... error=<type>`: for example an empty or whitespace-only
 file (`ValueError`), a corrupt or password-protected workbook (`ExcelReadError`), invalid JSON
 (`JsonReadError`), an unreadable Parquet file (`ParquetReadError`), an archive error or cap
-(`ArchiveReadError`), a file that changed during the read (`RuntimeError`), a file that cannot be
-read at all (for example `PermissionError`). A `sheets:` name not in the workbook, or a `header_row`
+(`ArchiveReadError`), a file that changed during the read or an archive whose raw copy does not match
+its hash (`RuntimeError`), a file that cannot be
+read at all (for example `PermissionError`). A raw or bronze partition folder that cannot be listed
+also fails the file, because the loader cannot tell whether it was loaded. A `sheets:` name not in the workbook, or a `header_row`
 past the end of a sheet, also fails the file. A failed member fails only that member; members
 already written stay.
 
@@ -336,8 +343,9 @@ config message can echo config text.
 ## 8. Assumptions and limits
 
 - **One writer per source at a time.** Two concurrent runs can both pass the skip check and write
-  the same file, so its rows appear twice. Nothing is overwritten, and silver dedupes on
-  `_file_hash`, but bronze does not prevent it (ADR 0001).
+  the same file, so its rows appear twice. Each write uses its own temp file and nothing is
+  overwritten, and silver dedupes on `_file_hash`, but bronze does not prevent it (ADR 0001). If
+  both try to publish the same raw copy, one of them fails that file for that run.
 - **Local filesystem with hard links.** The no-replace publish uses `os.link`, so the lake's
   filesystem must support hard links, with no fallback. Azure Blob Storage has no `os.link`; a move
   there needs a conditional create (an upload with `If-None-Match: *`, or `overwrite=False` in the
@@ -464,6 +472,12 @@ Each flag takes a whole number of at least 1. Any other value exits 2.
   streams, that blob fails with `TotalSizeCapError`, and the same stop and extra failure follow.
 - **A listing error stages nothing.** The listing is read before the first download, so a failed
   listing downloads nothing.
+- **Interrupted runs.** A run that stops early can leave a hidden temp file
+  (`.<16 hex><ext>.tmp`) in the landing folder. Bronze skips it because it is hidden, staging does
+  not reuse it, and neither removes it.
+- **Leftovers from earlier staging code.** It used a visible `<name>.tmp` temp file, which bronze
+  reads like any other landing file. Check each staged landing folder once for such files and
+  remove them by hand.
 - **Read only.** The code makes only list and download calls. It never writes, deletes, renames or
   re-tiers a blob.
 

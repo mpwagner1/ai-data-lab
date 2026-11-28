@@ -178,13 +178,12 @@ def _zip_units(path: Path, workdir: Path, counts: ArchiveCounts) -> Iterator[Arc
             target.unlink(missing_ok=True)
 
 
-def _gzip_member_name(path: Path) -> str:
-    name = path.name
+def _gzip_member_name(name: str) -> str:
     return name[: -len(".gz")] if name.lower().endswith(".gz") else name
 
 
-def _gzip_units(path: Path, workdir: Path) -> Iterator[ArchiveUnit]:
-    name = _gzip_member_name(path)
+def _gzip_units(path: Path, workdir: Path, archive_name: str) -> Iterator[ArchiveUnit]:
+    name = _gzip_member_name(archive_name)
     target = workdir / f"member-1{member_extension(name)}"
     with gzip.open(path, "rb") as source:
         file_hash = _stream_to_file(source, target, _Budget(path))
@@ -202,18 +201,22 @@ def _guarded_units(path: Path, units: Iterator[ArchiveUnit]) -> Iterator[Archive
 
 
 def expand_archive(
-    path: Path, is_gzip: bool, counts: ArchiveCounts | None = None
+    path: Path, is_gzip: bool, counts: ArchiveCounts | None = None, name: str | None = None
 ) -> Iterator[ArchiveUnit]:
     """Yield each member of a zip (or the one member of a gzip) as an `ArchiveUnit`.
 
     The member file lives in a private temporary directory that is removed when the iterator is
     exhausted or closed; a unit's file is deleted when the next one is requested. Nothing is
     written anywhere else. Raises ArchiveReadError (no `__cause__` or `__context__`).
-    `counts` collects skipped entries.
+    `counts` collects skipped entries. `name` is the archive's original file name when `path` is a
+    stored copy (default: the name of `path`); a gzip member is named after it.
     """
     counts = counts if counts is not None else ArchiveCounts()
     with tempfile.TemporaryDirectory(prefix="bronze-archive-") as directory:
         workdir = Path(directory)
-        units = _gzip_units(path, workdir) if is_gzip else _zip_units(path, workdir, counts)
+        if is_gzip:
+            units = _gzip_units(path, workdir, name or path.name)
+        else:
+            units = _zip_units(path, workdir, counts)
         with closing(units):
             yield from _guarded_units(path, units)
