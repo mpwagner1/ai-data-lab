@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     "azure-identity>=1.27.0",
     "azure-storage-blob>=12.31.1",
-    "dagster>=1.13.29",
+    "dagster>=1.13.31",
     "dbt-core>=1.12.6",
     "dbt-duckdb>=1.11.1",
     "duckdb>=2.0.0",
