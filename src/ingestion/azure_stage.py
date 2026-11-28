@@ -66,7 +66,7 @@ DEFAULT_MAX_TOTAL_MIB = 2048
 _MIB = 1024 * 1024
 _ACCOUNT_PATTERN = re.compile(r"[a-z0-9]{3,24}")
 _CONTAINER_PATTERN = re.compile(r"(?!.*--)[a-z0-9][a-z0-9-]{1,61}[a-z0-9]")  # 3-63, no "--"
-_RESERVED_SUFFIX = ".tmp"  # the temp name `publish` uses; a blob with it could clobber a temp file
+_RESERVED_SUFFIX = ".tmp"  # marks `publish` temp files, so no staged file may use it
 _EVENT_LEVELS = {"azure_stage_error": logging.ERROR, "azure_stage_rejected": logging.WARNING}
 
 

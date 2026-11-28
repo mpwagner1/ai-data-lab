@@ -28,7 +28,13 @@ from ingestion.json_reader import read_json, read_ndjson
 from ingestion.metadata import hash_file, with_metadata
 from ingestion.parquet_reader import read_parquet_as_strings
 from ingestion.parsed import ParsedPart
-from ingestion.raw_zone import SOURCE_PATTERN, landing_files, publish, receive_raw
+from ingestion.raw_zone import (
+    SOURCE_PATTERN,
+    landing_files,
+    partition_files,
+    publish,
+    receive_raw,
+)
 from ingestion.source_config import (
     CONFIG_ROOT,
     SourceConfig,
@@ -94,7 +100,10 @@ def _source_dir(lake_root: Path, source: str) -> Path:
 
 
 def _already_ingested(source_dir: Path, file_hash: str) -> bool:
-    return any(source_dir.glob(f"ingest_date=*/{file_hash}*.parquet"))
+    return any(
+        p.name.startswith(file_hash) and p.name.endswith(".parquet")
+        for p in partition_files(source_dir, "ingest_date")
+    )
 
 
 def _target_path(source_dir: Path, file_hash: str, run_at: datetime) -> Path:
@@ -357,7 +366,15 @@ def ingest_landing(
             file_format = detect_format(path, config)
             if file_format in ARCHIVE_FORMATS:
                 outcome = ingest_archive(
-                    path, file_format, source, lake_root, force, run_at, config, delimiter
+                    path,
+                    file_hash,
+                    file_format,
+                    source,
+                    lake_root,
+                    force,
+                    run_at,
+                    config,
+                    delimiter,
                 )
                 failed += outcome.failed
                 pending += outcome.pending
